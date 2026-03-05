@@ -38,6 +38,8 @@ const CashierView: React.FC<CashierViewProps> = ({ profile, onLogout }) => {
   const [loading, setLoading] = useState(true);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
 
+  console.log('🎬 CashierView rendered | activeTab =', activeTab);
+
   useEffect(() => {
     const unsubs = [
       listenToPendingCashOrders((data) => {
@@ -860,12 +862,16 @@ const CashierView: React.FC<CashierViewProps> = ({ profile, onLogout }) => {
         </header>
 
         <div className="p-4 lg:p-6">
-          {activeTab === 'Dashboard' && renderDashboard()}
-          {activeTab === 'CashRequests' && renderCashRequests()}
-          {activeTab === 'AllOrders' && renderAllOrders()}
-          {activeTab === 'DailySummary' && renderDailySummary()}
-          {activeTab === 'Reports' && renderReports()}
-          {activeTab === 'Settings' && renderSettings()}
+          {(() => {
+            console.log('📺 Rendering content for activeTab:', activeTab);
+            if (activeTab === 'Dashboard') return renderDashboard();
+            if (activeTab === 'CashRequests') return renderCashRequests();
+            if (activeTab === 'AllOrders') return renderAllOrders();
+            if (activeTab === 'DailySummary') return renderDailySummary();
+            if (activeTab === 'Reports') return renderReports();
+            if (activeTab === 'Settings') return renderSettings();
+            return null;
+          })()}
         </div>
       </main>
     </div>
