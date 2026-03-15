@@ -6,7 +6,10 @@ import {
 } from 'lucide-react';
 import { UserProfile, MenuItem, CartItem, Order } from '../../types';
 import { CATEGORIES } from '../../constants';
-import { listenToMenu, listenToUserOrders, saveCartDraft } from '../../services/firestore-db';
+import { listenToMenu, listenToUserOrders, saveCartDraft, getQueueEstimate } from '../../services/firestore-db';
+import { useInventory } from '../../hooks/useInventory';
+import { useMotivationalHeadline } from '../../hooks/useMotivationalHeadline';
+import MotivationalHeadline from '../../components/MotivationalHeadline';
 import { onSnapshot, collection, query, where } from 'firebase/firestore';
 import { db } from '../../firebase';
 import Logo from '../../components/Logo';
@@ -27,6 +30,8 @@ const HomeView: React.FC<HomeViewProps> = ({ profile, onProceed, onViewOrders, o
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
   const [myOrders, setMyOrders] = useState<Order[]>([]);
   const [showRejectNotice, setShowRejectNotice] = useState(false);
+  const [queueEstimate, setQueueEstimate] = useState<{ minutes: number; pendingCount: number } | null>(null);
+  const { stockByItemId, isOutOfStock, canAddToCart } = useInventory();
 
   useEffect(() => {
     const unsubscribe = listenToMenu((items) => {
@@ -34,6 +39,13 @@ const HomeView: React.FC<HomeViewProps> = ({ profile, onProceed, onViewOrders, o
       setLoading(false);
     });
     return unsubscribe;
+  }, []);
+
+  useEffect(() => {
+    const load = () => getQueueEstimate().then(setQueueEstimate).catch(() => setQueueEstimate(null));
+    load();
+    const t = setInterval(load, 30000);
+    return () => clearInterval(t);
   }, []);
 
   useEffect(() => {
@@ -68,6 +80,13 @@ const HomeView: React.FC<HomeViewProps> = ({ profile, onProceed, onViewOrders, o
     });
   }, [myOrders]);
 
+  const isPrepWaiting =
+    !!activeOrder &&
+    activeOrder.orderType === 'PREPARATION_ITEM' &&
+    activeOrder.paymentStatus === 'SUCCESS' &&
+    ['NEW', 'QUEUED', 'PREPARING'].includes(activeOrder.serveFlowStatus || 'NEW');
+  const { visible: showHeadline, headline } = useMotivationalHeadline(isPrepWaiting);
+
   useEffect(() => {
     const savedCart = localStorage.getItem('joe_cart');
     if (savedCart) {
@@ -100,20 +119,21 @@ const HomeView: React.FC<HomeViewProps> = ({ profile, onProceed, onViewOrders, o
   }, [selectedCategory, search, menu]);
 
   const updateCart = (item: MenuItem, delta: number) => {
+    if (delta > 0 && isOutOfStock(item.id)) return;
     setCart(prev => {
       const newCart = { ...prev };
       if (!newCart[item.id]) {
         if (delta > 0) newCart[item.id] = { ...item, quantity: 1 };
       } else {
-        newCart[item.id].quantity += delta;
+        let newQty = newCart[item.id].quantity + delta;
+        const maxAllowed = stockByItemId[item.id]?.available ?? 999;
+        if (newQty > maxAllowed) newQty = maxAllowed;
+        newCart[item.id].quantity = newQty;
         if (newCart[item.id].quantity <= 0) delete newCart[item.id];
       }
       const cartArray = Object.values(newCart);
       localStorage.setItem('joe_cart', JSON.stringify(cartArray));
-      // Sync draft cart to Firestore for reliability
-      if (profile?.uid) {
-        saveCartDraft(profile.uid, cartArray);
-      }
+      if (profile?.uid) saveCartDraft(profile.uid, cartArray);
       return newCart;
     });
   };
@@ -267,7 +287,22 @@ const HomeView: React.FC<HomeViewProps> = ({ profile, onProceed, onViewOrders, o
       )}
 
       {/* Live Order Tracker Banner */}
-      {activeOrder && (
+      {activeOrder && (() => {
+        const isPrep = activeOrder.orderType === 'PREPARATION_ITEM';
+        const flow = activeOrder.serveFlowStatus || (activeOrder.paymentStatus === 'SUCCESS' ? 'PAID' : 'NEW');
+        const pickupStart = activeOrder.pickupWindowStart != null ? new Date(activeOrder.pickupWindowStart).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: false }) : null;
+        const pickupEnd = activeOrder.pickupWindowEnd != null ? new Date(activeOrder.pickupWindowEnd).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: false }) : null;
+        const pickupText = pickupStart && pickupEnd ? `${pickupStart} – ${pickupEnd}` : null;
+        const statusLine = activeOrder.paymentStatus === 'PENDING'
+          ? 'Awaiting Cash at Counter'
+          : isPrep
+            ? flow === 'READY'
+              ? `Ready for pickup${pickupText ? `. Window: ${pickupText}` : ''}`
+              : flow === 'PREPARING'
+                ? `Being prepared${pickupText ? `. Pickup window: ${pickupText}` : ''}`
+                : 'Order received. We will notify when ready.'
+            : 'Ready to Scan at Serving Counter';
+        return (
         <div className="p-4 animate-in slide-in-from-top-4 duration-500">
            <div className={`p-5 rounded-[2rem] shadow-xl border-l-8 flex flex-col gap-4 relative overflow-hidden ${
              activeOrder.paymentStatus === 'PENDING' 
@@ -284,9 +319,7 @@ const HomeView: React.FC<HomeViewProps> = ({ profile, onProceed, onViewOrders, o
                    <p className="text-[10px] font-black uppercase tracking-widest text-textSecondary">Active Order Status</p>
                  </div>
                  <h4 className="text-xl font-black text-textMain tracking-tighter">
-                   {activeOrder.paymentStatus === 'PENDING'
-                     ? 'Awaiting Cash at Counter'
-                     : 'Ready to Scan at Serving Counter'}
+                   {statusLine}
                  </h4>
                </div>
                <div className="bg-white/80 backdrop-blur px-4 py-2 rounded-2xl border border-black/5 shadow-sm text-center">
@@ -294,15 +327,17 @@ const HomeView: React.FC<HomeViewProps> = ({ profile, onProceed, onViewOrders, o
                   <p className="text-xs font-black text-textMain">#{activeOrder.id.slice(-6).toUpperCase()}</p>
                </div>
              </div>
-             
+             {isPrep && activeOrder.paymentStatus === 'SUCCESS' && (
+               <MotivationalHeadline visible={showHeadline} headline={headline} variant="inline" />
+             )}
              <div className="flex items-center gap-4 mt-2">
                 <div className="flex-1 h-2 bg-gray-100 rounded-full overflow-hidden">
                    <div 
-                    className={`h-full transition-all duration-1000 ${activeOrder.paymentStatus === 'PENDING' ? 'w-1/3 bg-cash' : 'w-2/3 bg-primary'}`} 
+                    className={`h-full transition-all duration-1000 ${activeOrder.paymentStatus === 'PENDING' ? 'w-1/3 bg-cash' : flow === 'READY' ? 'w-full bg-primary' : 'w-2/3 bg-primary'}`} 
                    />
                 </div>
                 <p className="text-[10px] font-black text-textSecondary uppercase tracking-widest whitespace-nowrap">
-                   {activeOrder.paymentStatus === 'PENDING' ? '1 of 3 Steps' : '2 of 3 Steps'}
+                   {activeOrder.paymentStatus === 'PENDING' ? '1 of 3 Steps' : flow === 'READY' ? 'Ready' : '2 of 3 Steps'}
                 </p>
              </div>
 
@@ -315,12 +350,16 @@ const HomeView: React.FC<HomeViewProps> = ({ profile, onProceed, onViewOrders, o
                <p className="text-[10px] font-bold text-textSecondary leading-tight">
                  {activeOrder.paymentStatus === 'PENDING' 
                    ? 'Please visit the cashier counter to complete your cash payment.' 
-                   : 'Payment confirmed! Head to the serving counter to scan your QR token.'}
+                   : isPrep && flow === 'READY'
+                     ? (pickupText ? `Pickup window: ${pickupText}. Come to the counter and scan your QR.` : 'Come to the counter and scan your QR.')
+                     : isPrep
+                       ? 'You will get a notification when your order is ready. Arrive during your pickup window.'
+                       : 'Payment confirmed! Head to the serving counter to scan your QR token.'}
                </p>
              </div>
            </div>
         </div>
-      )}
+      ); })()}
 
       {/* Dynamic Menu Container */}
       {loading ? (
@@ -339,59 +378,86 @@ const HomeView: React.FC<HomeViewProps> = ({ profile, onProceed, onViewOrders, o
         </div>
       ) : (
         <div className="p-4 grid grid-cols-2 gap-4 animate-in fade-in duration-500">
-          {filteredMenu.map(item => (
-            <div key={item.id} className="bg-white rounded-[2.5rem] overflow-hidden shadow-sm border border-black/5 group hover:border-primary/20 transition-all flex flex-col active:scale-[0.98]">
-              <div className="h-32 bg-gray-100 overflow-hidden relative">
-                <img 
-                  src={item.imageUrl || 'https://images.unsplash.com/photo-1630383249896-424e482df921?auto=format&fit=crop&q=80&w=400'} 
-                  alt={item.name} 
-                  className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-700"
-                  onError={(e) => {
-                    const target = e.target as HTMLImageElement;
-                    target.src = 'https://images.unsplash.com/photo-1630383249896-424e482df921?auto=format&fit=crop&q=80&w=400';
-                  }}
-                />
-                <div className="absolute top-4 right-4 bg-white/95 backdrop-blur px-3 py-1.5 rounded-xl text-xs font-black text-textMain shadow-lg border border-black/5">
-                  ₹{item.price}
-                </div>
-              </div>
-              <div className="p-5 flex-1 flex flex-col justify-between">
-                <h3 className="font-black text-textMain text-xs leading-relaxed mb-4">{item.name}</h3>
-                <div className="flex items-center justify-between">
-                  {cart[item.id] ? (
-                    <div className="flex items-center gap-2 bg-gray-50 rounded-2xl p-1 w-full justify-between border border-black/5">
-                      <button 
-                        onClick={() => updateCart(item, -1)}
-                        className="w-9 h-9 flex items-center justify-center bg-white text-textMain rounded-xl shadow-sm active:scale-75 transition-all border border-black/5"
-                      >
-                        <Minus className="w-3.5 h-3.5" />
-                      </button>
-                      <span className="font-black text-xs text-textMain">{cart[item.id].quantity}</span>
-                      <button 
-                        onClick={() => updateCart(item, 1)}
-                        className="w-9 h-9 flex items-center justify-center bg-primary text-white rounded-xl shadow-lg active:scale-75 transition-all"
-                      >
-                        <Plus className="w-3.5 h-3.5" />
-                      </button>
+          {filteredMenu.map(item => {
+            const stock = stockByItemId[item.id];
+            const available = stock?.available ?? 999;
+            const status = stock?.status ?? 'AVAILABLE';
+            const outOfStock = available <= 0;
+            const lowStock = status === 'LOW_STOCK';
+            const canAdd = !outOfStock && canAddToCart(item.id, cart[item.id]?.quantity ?? 0);
+            return (
+              <div key={item.id} className={`bg-white rounded-[2.5rem] overflow-hidden shadow-sm border border-black/5 group hover:border-primary/20 transition-all flex flex-col active:scale-[0.98] ${outOfStock ? 'opacity-80' : ''}`}>
+                <div className="h-32 bg-gray-100 overflow-hidden relative">
+                  <img 
+                    src={item.imageUrl || 'https://images.unsplash.com/photo-1630383249896-424e482df921?auto=format&fit=crop&q=80&w=400'} 
+                    alt={item.name} 
+                    className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-700"
+                    onError={(e) => {
+                      const target = e.target as HTMLImageElement;
+                      target.src = 'https://images.unsplash.com/photo-1630383249896-424e482df921?auto=format&fit=crop&q=80&w=400';
+                    }}
+                  />
+                  <div className="absolute top-4 right-4 bg-white/95 backdrop-blur px-3 py-1.5 rounded-xl text-xs font-black text-textMain shadow-lg border border-black/5">
+                    ₹{item.price}
+                  </div>
+                  {stock && (
+                    <div className={`absolute bottom-2 left-2 right-2 text-center text-[10px] font-bold py-1 rounded-lg ${
+                      outOfStock ? 'bg-error/90 text-white' : lowStock ? 'bg-amber-500/90 text-white' : 'bg-success/90 text-white'
+                    }`}>
+                      {outOfStock ? 'Out of Stock' : lowStock ? `Low Stock (${available} left)` : `Available (${available} left)`}
                     </div>
-                  ) : (
-                    <button 
-                      onClick={() => updateCart(item, 1)}
-                      className="w-full py-3.5 flex items-center justify-center gap-2 bg-primary/5 text-primary text-[10px] font-black uppercase tracking-widest rounded-2xl border border-primary/20 hover:bg-primary hover:text-white transition-all active:scale-95"
-                    >
-                      <Plus className="w-3 h-3" /> Add Item
-                    </button>
                   )}
                 </div>
+                <div className="p-5 flex-1 flex flex-col justify-between">
+                  <h3 className="font-black text-textMain text-xs leading-relaxed mb-4">{item.name}</h3>
+                  <div className="flex items-center justify-between">
+                    {cart[item.id] ? (
+                      <div className="flex items-center gap-2 bg-gray-50 rounded-2xl p-1 w-full justify-between border border-black/5">
+                        <button 
+                          onClick={() => updateCart(item, -1)}
+                          className="w-9 h-9 flex items-center justify-center bg-white text-textMain rounded-xl shadow-sm active:scale-75 transition-all border border-black/5"
+                        >
+                          <Minus className="w-3.5 h-3.5" />
+                        </button>
+                        <span className="font-black text-xs text-textMain">{cart[item.id].quantity}</span>
+                        <button 
+                          onClick={() => canAdd && updateCart(item, 1)}
+                          disabled={!canAdd}
+                          className={`w-9 h-9 flex items-center justify-center rounded-xl shadow-lg active:scale-75 transition-all ${canAdd ? 'bg-primary text-white' : 'bg-gray-200 text-gray-400 cursor-not-allowed'}`}
+                        >
+                          <Plus className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    ) : (
+                      <button 
+                        onClick={() => canAdd && updateCart(item, 1)}
+                        disabled={!canAdd}
+                        className={`w-full py-3.5 flex items-center justify-center gap-2 text-[10px] font-black uppercase tracking-widest rounded-2xl border transition-all active:scale-95 ${
+                          outOfStock
+                            ? 'bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed'
+                            : 'bg-primary/5 text-primary border-primary/20 hover:bg-primary hover:text-white'
+                        }`}
+                      >
+                        <Plus className="w-3 h-3" /> {outOfStock ? 'Out of Stock' : 'Add Item'}
+                      </button>
+                    )}
+                  </div>
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
 
       {/* Floating Cart Indicator */}
       {cartItemsCount > 0 && (
         <div className="fixed bottom-0 left-0 right-0 p-6 bg-white/80 backdrop-blur-2xl border-t border-black/5 z-40 animate-in slide-in-from-bottom-full duration-700">
+          {queueEstimate != null && queueEstimate.pendingCount > 0 && (
+            <p className="text-center text-[10px] font-bold text-textSecondary mb-2 flex items-center justify-center gap-1">
+              <Clock className="w-3.5 h-3.5" />
+              Estimated wait: ~{queueEstimate.minutes} min
+            </p>
+          )}
           <div className="max-w-md mx-auto flex items-center justify-between gap-8">
             <div className="flex flex-col">
               <span className="text-[9px] font-black text-textSecondary uppercase tracking-widest">{cartItemsCount} Units Selected</span>

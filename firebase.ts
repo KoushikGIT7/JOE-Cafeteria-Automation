@@ -1,7 +1,7 @@
 // Firebase Configuration
 import { initializeApp, getApps, FirebaseApp } from "firebase/app";
 import { getAuth, Auth } from "firebase/auth";
-import { initializeFirestore, getFirestore, Firestore, persistentLocalCache } from "firebase/firestore";
+import { initializeFirestore, Firestore, memoryLocalCache } from "firebase/firestore";
 
 // Firebase configuration - load from environment variables or use defaults
 const firebaseConfig = {
@@ -22,30 +22,29 @@ if (getApps().length === 0) {
   app = getApps()[0];
 }
 
-// Initialize Firebase services
+// Initialize Firebase Auth
 export const auth: Auth = getAuth(app);
 
-// Initialize Firestore with persistent local cache (future-safe, replaces deprecated enableIndexedDbPersistence)
-// This enables offline persistence and queue writes when network is unavailable
+// Initialize Firestore with memoryLocalCache.
+//
+// WHY NOT persistentLocalCache?
+// persistentLocalCache() uses IndexedDB which triggers a known Firebase SDK
+// internal assertion error (ID: ca9 / b815, ve=-1) when:
+//   - The IndexedDB watch-stream target state gets corrupted
+//   - Multiple browser tabs are open simultaneously
+//   - Network conditions cause the watch stream to reset unexpectedly
+//
+// memoryLocalCache is stable, does not use IndexedDB, has no multi-tab
+// conflicts, and still provides full real-time onSnapshot support.
+// Offline persistence is not critical for a cafeteria ordering system.
+//
+// experimentalForceLongPolling: true — improves reliability on college/
+// corporate WiFi networks that block WebSocket upgrades (HTTP polling fallback).
 let db: Firestore;
-if (typeof window !== 'undefined') {
-  try {
-    // Use initializeFirestore with persistentLocalCache for offline support
-    db = initializeFirestore(app, {
-      cache: persistentLocalCache()
-    });
-  } catch (error: any) {
-    // Fallback to default Firestore if initialization fails (e.g., multiple tabs)
-    if (error.code === 'failed-precondition') {
-      db = getFirestore(app);
-    } else {
-      throw error;
-    }
-  }
-} else {
-  // Server-side rendering: use default Firestore without persistence
-  db = getFirestore(app);
-}
+db = initializeFirestore(app, {
+  localCache: memoryLocalCache(),
+  experimentalForceLongPolling: true,
+});
 
 export { db };
 

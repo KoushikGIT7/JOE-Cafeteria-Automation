@@ -1,0 +1,362 @@
+================================================================================
+  JOE CAFETERIA AUTOMATION - FIREBASE IMPLEMENTATION STATUS
+  Industry-Standard Perspective: Logic, Operations & Current State
+  Generated: 2025-03-14
+================================================================================
+
+1. EXECUTIVE SUMMARY
+--------------------------------------------------------------------------------
+The project uses Firebase on the FRONTEND (React + Vite) for:
+  - Authentication (Firebase Auth): Google OAuth, email/password, guest mode
+  - Database (Cloud Firestore): orders, menu, users, inventory, settings,
+    scanLogs, serveLogs, dailyReports, carts
+
+The BACKEND (Node/Express + PostgreSQL) does NOT use Firestore for primary data.
+It uses Firebase UID only for user identity (firebase_uid in users table) and
+JWT issuance. All live order/menu/payment flows are served by the frontend
+talking directly to Firestore.
+
+Current state: Production-ready Firestore + Auth implementation with real-time
+listeners, offline persistence, role-based security rules, and atomic
+transactions for critical paths (cash confirmation, serve item, inventory).
+Analytics is intentionally disabled to avoid ad-blocker issues.
+
+
+2. FIREBASE PRODUCTS IN USE
+--------------------------------------------------------------------------------
+  Product              | Used | Purpose
+  ---------------------|------|------------------------------------------
+  Firebase Auth        | Yes  | Sign-in (Google, email/password, guest)
+  Cloud Firestore      | Yes  | Primary app database (orders, menu, users, etc.)
+  Firebase App (core)  | Yes  | Single app init, config from env or defaults
+  Firebase Analytics   | No   | Disabled (ERR_BLOCKED_BY_CLIENT in browsers)
+  Firebase Storage     | No   | Not used
+  Firebase Admin SDK   | Backend package only | firebase-admin in backend/package.json
+                        |      | Not used in backend code for Firestore/Auth
+
+  Frontend SDK: firebase ^12.8.0 (package.json)
+  Backend: firebase-admin ^12.0.0 in backend/package.json (dependency present,
+          but no Firebase Admin usage in backend/src for auth or Firestore).
+
+
+3. CONFIGURATION & INITIALIZATION
+--------------------------------------------------------------------------------
+  File: firebase.ts
+
+  - Single app instance: getApps().length === 0 then initializeApp(config).
+  - Config source: import.meta.env.VITE_FIREBASE_* with fallback to hardcoded
+    values (project joecafe-a7fff). For production, industry standard is to
+    use env-only and avoid committing secrets; fallbacks are acceptable for
+    demo/defaults if documented.
+  - Auth: getAuth(app) — default persistence (local) for web.
+  - Firestore: initializeFirestore(app, { cache: persistentLocalCache() }) in
+    browser for offline persistence; fallback to getFirestore(app) on
+    failed-precondition (e.g. multiple tabs) or on server (SSR).
+  - Analytics: explicitly not initialized (commented out) to prevent
+    ad-blocker conflicts.
+
+  Environment variables (vite-env.d.ts):
+  VITE_FIREBASE_API_KEY, VITE_FIREBASE_AUTH_DOMAIN, VITE_FIREBASE_PROJECT_ID,
+  VITE_FIREBASE_STORAGE_BUCKET, VITE_FIREBASE_MESSAGING_SENDER_ID,
+  VITE_FIREBASE_APP_ID, VITE_FIREBASE_MEASUREMENT_ID.
+
+
+4. AUTHENTICATION — LOGIC & FLOW
+--------------------------------------------------------------------------------
+  Service: services/auth.ts
+  Hook: hooks/useAuth.ts
+
+  4.1 Methods
+  ----------
+  - signInWithGoogle(): GoogleAuthProvider; popup on desktop, redirect on
+    mobile (isMobilePlatform()). After auth, getUserProfile(uid); if no
+    profile, createUserProfile() then re-fetch. Returns { user, profile }.
+  - signIn(email, password): signInWithEmailAndPassword → getUserProfile →
+    validate role/active; update lastActive in Firestore (merge). Returns
+    { user, profile }. Throws PROFILE_MISSING, PROFILE_INCOMPLETE, ROLE_DENIED,
+    ACCOUNT_DEACTIVATED for UI handling.
+  - signUp(email, password, name, role?, studentType?): createUserWithEmailAndPassword
+    → updateProfile → createUserProfile (Firestore users/{uid}).
+  - signOut(): Firebase signOut only.
+  - signInAsGuest(name, studentType?): In-memory guest profile only (guest_
+    prefixed uid). No Firebase Auth; Firestore rules allow unauthenticated
+    order create/read for guest userIds.
+  - onAuthStateChange(callback): Wraps onAuthStateChanged. Handles
+    getRedirectResult once for mobile Google redirect. On user: getUserProfile;
+    if missing, createUserProfile then re-fetch; on error, fallback in-memory
+    profile + background upsert to Firestore. Callback(user, profile).
+
+  4.2 Profile & role
+  -----------------
+  - User profile stored in Firestore: users/{uid} with uid, email, name, role,
+    studentType, active, createdAt, lastActive.
+  - getDoc(users/{uid}); role validated against validRoles; if role missing or
+    wrong, infer from email (admin@joe.com, cashier@joe.com, server@joe.com)
+    and optionally fix Firestore with setDoc(..., { merge: true }).
+  - createUserProfile: setDoc with merge: true (idempotent upsert).
+
+  4.3 useAuth hook
+  ---------------
+  - State: user (FirebaseUser | null), profile (UserProfile | null), loading.
+  - Single subscription to onAuthStateChange; sets user and profile; loading
+    false when profile is set (or after 2s safeguard if profile null).
+  - role = profile?.role ?? null. Used by App.tsx for routing (admin/cashier/
+    server/student).
+
+  Industry alignment: Centralized auth state, role from Firestore with
+  email-based fallback and self-healing writes, platform-aware Google sign-in,
+  and graceful fallback on profile read failure are in line with common
+  production patterns.
+
+
+5. FIRESTORE SCHEMA & COLLECTIONS
+--------------------------------------------------------------------------------
+  Collections and usage:
+
+  users/{uid}
+    - uid, name, email, role, studentType, active, createdAt, lastActive
+    - Read by auth service and firestore-db; write by auth and admin flows.
+
+  menu/{itemId}
+    - MenuItem: id, name, price, costPrice, category, imageUrl, active, etc.
+    - listenToMenu (all), addMenuItem, updateMenuItem, deleteMenuItem.
+    - initializeMenu: if empty, batch write INITIAL_MENU + inventory docs.
+
+  orders/{orderId}
+    - orderId, userId, userName, items[], totalAmount, paymentType, paymentStatus,
+      orderStatus, qrStatus, qr: { token, status, createdAt }, createdAt,
+      scannedAt, servedAt, cafeteriaId, confirmedBy, confirmedAt, rejectedBy,
+      rejectedAt. Items: id, name, price, costPrice, category, imageUrl,
+      quantity, servedQty, remainingQty.
+    - createOrder, getOrder, listenToOrder, listenToUserOrders,
+      listenToLatestActiveQR, listenToPendingCashOrders, listenToActiveOrders,
+      listenToPendingItems, confirmCashPayment, rejectCashPayment,
+      validateQRForServing, serveItem, etc.
+
+  inventory/{itemId}
+    - itemId, itemName, openingStock, consumed, category, lastUpdated.
+    - getInventory, updateInventory (transaction), updateInventoryItem,
+      listenToInventory.
+
+  settings/global
+    - isMaintenanceMode, acceptingOrders, announcement, taxRate, minOrderValue,
+      peakHourThreshold, autoSettlementEnabled, updatedAt.
+    - getSettings, updateSettings, listenToSettings.
+
+  scanLogs/{logId}
+    - orderId, userId, userName, scannedBy, scanTime, scanResult, totalAmount,
+      failureReason (optional).
+    - Written on QR validate; getScanLogs.
+
+  serveLogs/{logId}
+    - orderId, itemId, itemName, quantityServed, servedBy, servedAt.
+    - Written inside serveItem transaction; getServeLogs.
+
+  dailyReports/{date}
+    - getDailyReport.
+
+  carts/{userId}
+    - userId, items[], updatedAt. saveCartDraft (merge).
+
+  Type mapping: orderToFirestore / firestoreToOrder in firestore-db.ts convert
+  Order <-> Firestore (Timestamps, nested qr, etc.). Same for other entities
+  with toMillis helpers for Timestamp.
+
+
+6. SECURITY RULES (firestore.rules)
+--------------------------------------------------------------------------------
+  rules_version = '2'
+
+  - users: read own or admin; create/update own or admin; delete admin only.
+  - menu: read all; write admin only.
+  - orders: read all; create all (guests allowed); update by admin, or
+    cashier (paymentStatus, qrStatus, confirmedBy, confirmedAt, orderStatus,
+    rejectedAt, rejectedBy), or server (orderStatus, scannedAt, servedAt,
+    items); delete admin only.
+  - inventory: read admin/server/cashier; write admin/server.
+  - settings: read all; write admin.
+  - scanLogs: read admin/server/cashier; create admin/server; update/delete admin.
+  - serveLogs: read admin/server/cashier; create admin/server; update/delete admin.
+  - dailyReports: read admin/cashier; write admin.
+
+  Helpers: isAuthenticated(), getUserRole(), hasRole(role), isAdminOrRole(role).
+  Role is read from users/{uid}.data.role. This matches industry practice:
+  resource-based rules with role checks and granular update keys for orders.
+
+
+7. FIRESTORE INDEXES (firestore.indexes.json)
+--------------------------------------------------------------------------------
+  Deployed via: firebase deploy --only firestore:indexes (project joecafe-a7fff).
+
+  Composite indexes defined:
+  1) orders: paymentType ASC, paymentStatus ASC, createdAt DESC
+  2) orders: orderStatus ASC, paymentStatus ASC, qrStatus ASC, scannedAt DESC
+
+  Other queries avoid composite indexes by:
+  - Reading full collection and sorting/filtering in memory (e.g. listenToMenu,
+    listenToAllUsers), or
+  - Using single-field or range queries where index exists or default index
+    suffices.
+
+  Reporting (services/reporting.ts) uses:
+  - where('createdAt', '>=', startMs), where('createdAt', '<=', endMs),
+    where('paymentStatus', '==', 'SUCCESS'), orderBy('createdAt', 'desc')
+  which requires a composite index (createdAt + paymentStatus + orderBy);
+  ensure that index is created in Firebase Console if not in firestore.indexes.json.
+
+
+8. OPERATIONS — HOW LOGIC RUNS
+--------------------------------------------------------------------------------
+  8.1 Real-time listeners (onSnapshot)
+  -----------------------------------
+  - listenToMenu: collection(db, "menu") → filter active, sort by name in memory.
+  - listenToAllOrders: orders orderBy createdAt desc.
+  - listenToUserOrders: userId == X, paymentStatus in [SUCCESS, PENDING].
+  - listenToAllUserOrders: userId == X.
+  - listenToLatestActiveQR: userId, paymentStatus == SUCCESS, qrStatus == ACTIVE;
+    then reduce to latest by createdAt.
+  - listenToPendingCashOrders: paymentType == CASH, paymentStatus == PENDING,
+    orderBy createdAt desc (uses composite index).
+  - listenToActiveOrders: orderStatus == ACTIVE, paymentStatus == SUCCESS,
+    qrStatus == USED, orderBy scannedAt desc.
+  - listenToPendingItems: same as listenToActiveOrders; then flatten order.items
+    with remainingQty > 0 into PendingItem[].
+  - listenToOrder(orderId): doc(db, "orders", orderId).
+  - listenToAllUsers: collection(db, "users"); sort by createdAt in memory.
+  - listenToInventory: collection(db, "inventory").
+  - listenToSettings: doc(db, "settings", "global").
+
+  Unsubscribe: All return a function that calls the unsubscribe from onSnapshot.
+
+  8.2 One-time reads
+  -----------------
+  - getOrder(orderId): getDoc(orders/{id}) → firestoreToOrder.
+  - getUserProfile: getDoc(users/{uid}) (in auth.ts and firestore-db.ts; auth
+    version has role inference and Firestore fix logic).
+  - getSettings, getInventory, getDailyReport, getScanLogs, getServeLogs:
+    getDoc or getDocs with optional orderBy/limit.
+
+  8.3 Writes (create/update)
+  --------------------------
+  - createOrder: generate order id, build Order, if payment SUCCESS set qr token
+    (generateQRPayloadSync), setDoc(orders/{id}, orderToFirestore(newOrder)).
+    On network error (unavailable/deadline-exceeded), logs warning and returns
+    optimistic id (offline queue).
+  - confirmCashPayment: runTransaction — get order, validate not already
+    SUCCESS, build temp order for QR, generateQRPayloadSync, update order
+    (paymentStatus, qrStatus, qr, confirmedBy, confirmedAt).
+  - rejectCashPayment: runTransaction — get order, require PENDING, update
+    paymentStatus REJECTED, orderStatus CANCELLED, rejectedAt, rejectedBy,
+    qrStatus REJECTED.
+  - validateQRForServing: parse/verify QR payload (expiry, secureHash), getDoc
+    order, verify payment and qrStatus, updateDoc qrStatus USED, orderStatus
+    ACTIVE, scannedAt, items; write scanLogs doc.
+  - serveItem: runTransaction — get order, validate status/payment/item
+    remainingQty; get inventory doc; update order items (servedQty, remainingQty),
+    orderStatus (COMPLETED if all served), servedAt; set serveLogs doc; update
+    inventory consumed (increment(1)). All in one transaction (industry-standard
+    for consistency).
+  - updateInventory: runTransaction read invRef, add consumed, update.
+  - Cart: saveCartDraft(userId, items) → setDoc(carts/{userId}, { merge: true }).
+
+  8.4 Reporting (services/reporting.ts)
+  ------------------------------------
+  - fetchReport({ role, start, end }): 5-min in-memory cache. Query orders
+    by createdAt range and paymentStatus == SUCCESS (and for cashier filter
+    paymentType CASH client-side); optional query for REJECTED for cashier.
+  - computeReport: aggregate totalRevenue, cash/online split, itemSales,
+    revenueTrend, peakHours from orders.
+  - invalidateReportsCache: called after createOrder, confirmCashPayment,
+    rejectCashPayment.
+  - exportReport: PDF/CSV/XLSX/JSON/PNG from ReportData.
+
+
+9. ATOMIC TRANSACTIONS & CONSISTENCY
+--------------------------------------------------------------------------------
+  - confirmCashPayment: single transaction (read order → update order).
+  - rejectCashPayment: single transaction (read order → update order).
+  - serveItem: single transaction (read order + inventory → update order,
+    write serveLog, update inventory). Prevents double-serve and inventory
+    drift.
+  - updateInventory (consumed): transaction read-then-update.
+
+  services/firestore.ts defines alternate schema (FirestoreOrder with
+  orderNumber, etc.) and serveItemAtomic / validateQRAtomic / listeners for
+  pendingItems collection. The main app uses firestore-db.ts (orders with
+  orderId string, no separate pendingItems collection). So firestore.ts
+  is an alternative/legacy module; primary production path is firestore-db.ts.
+
+
+10. BACKEND vs FIREBASE
+--------------------------------------------------------------------------------
+  - Backend (Node/Express) uses PostgreSQL for users (firebase_uid, email, name,
+    role, etc.) and JWT auth. Auth controller accepts firebaseUid and creates
+    or finds user by firebase_uid. So backend trusts Firebase UID as identity
+    but does not read/write Firestore; it has its own user store and tokens.
+  - Frontend uses Firebase Auth + Firestore for all live flows (menu, orders,
+    payments, serving, reports). No evidence of frontend calling backend for
+    order CRUD or menu; backend is a parallel path (e.g. for future API-first
+    or server-driven flows). Documentation (e.g. COMPLETE_ROADMAP, STATUS_DASHBOARD)
+    mentions migration from Firestore to backend API as a future step.
+
+
+11. INDUSTRY-STANDARD PERSPECTIVE
+--------------------------------------------------------------------------------
+  Strengths:
+  - Single Firebase app init and explicit Firestore persistence (offline).
+  - Role-based security rules with limited update keys (e.g. cashier vs
+    server on orders).
+  - Critical mutations (cash confirm/reject, serve item, inventory) use
+    transactions to avoid race conditions.
+  - Real-time everywhere that matters (orders, menu, settings, user orders,
+    active QR, pending cash).
+  - Auth: one listener, profile + role resolution, fallback profile and
+    self-healing role in Firestore.
+  - Guest checkout supported without Auth (documented in rules).
+  - Type-safe mapping (Order <-> Firestore) and Timestamp handling in one place.
+
+  Gaps / considerations:
+  - Firebase config has fallback values in code; production should prefer
+    env-only and secrets outside repo.
+  - Analytics disabled: acceptable for UX; if needed later, enable only in
+    production and document.
+  - Backend firebase-admin is installed but not used for Firestore or Auth
+    verification; if you want server-side token verification or Firestore
+    access, integrate Firebase Admin and document it.
+  - Some composite queries (e.g. reporting date range + paymentStatus +
+    orderBy) may require additional indexes in Firebase Console if not in
+    firestore.indexes.json.
+  - Duplicate profile logic: auth.ts and firestore-db both have
+    getUserProfile/createUserProfile; auth version is the one with role
+    inference and Firestore fix. Prefer single source (e.g. auth service)
+    for profile reads in app code.
+
+
+12. FILE REFERENCE
+--------------------------------------------------------------------------------
+  firebase.ts                 — App init, Auth, Firestore, persistence
+  services/auth.ts            — Auth methods, profile, onAuthStateChange
+  hooks/useAuth.ts            — useAuth(): user, profile, loading, role
+  services/firestore-db.ts    — All Firestore CRUD, listeners, transactions
+  services/firestore.ts       — Alternate schema + atomic helpers (optional)
+  services/reporting.ts       — Report fetch (Firestore queries), cache, export
+  firestore.rules             — Security rules
+  firestore.indexes.json      — Composite indexes
+  firebase.json               — Firestore rules & indexes config
+  App.tsx                     — useAuth, initializeMenu, listenToLatestActiveQR,
+                               role-based routing
+  views/Student/PaymentView   — createOrder, listenToOrder, getOrder (firestore-db)
+
+
+13. DEPLOYMENT & TOOLS
+--------------------------------------------------------------------------------
+  - Indexes: firebase use joecafe-a7fff && firebase deploy --only firestore:indexes
+  - Rules: firebase deploy --only firestore:rules
+  - Emulator: scripts/test-emulator.ps1 (Firestore emulator)
+  - Setup docs: SETUP_STAFF_USERS.md, DEPLOY_INDEXES.md, DEPLOY_FIRESTORE_RULES.md,
+    FIRESTORE_SETUP.md, QUICK_DEPLOY.md
+
+
+================================================================================
+  END OF FIREBASE IMPLEMENTATION STATUS
+================================================================================

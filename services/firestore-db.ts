@@ -31,14 +31,29 @@ import {
   SystemSettings,
   ScanLog,
   InventoryItem,
+  InventoryMetaItem,
+  StockStatus,
   ServeLog,
   TransactionRecord,
   DailyReport,
   OrderStatus,
-  QRStatus
+  QRStatus,
+  KitchenStatus
 } from "../types";
-import { DEFAULT_FOOD_IMAGE, INITIAL_MENU } from "../constants";
+import { DEFAULT_FOOD_IMAGE, INITIAL_MENU, DEFAULT_ORDERING_ENABLED, DEFAULT_SERVING_RATE_PER_MIN, INVENTORY_SHARD_COUNT } from "../constants";
 import { parseQRPayload, verifySecureHash, verifySecureHashSync, generateQRPayload, generateQRPayloadSync, isQRExpired } from "./qr";
+import {
+  useCallables,
+  createOrderCallable,
+  confirmPaymentCallable,
+  rejectPaymentCallable,
+  validateQRCodeCallable,
+  serveItemCallable,
+  updateInventoryCallable,
+  updateKitchenStatusCallable,
+  updateServeFlowStatusCallable,
+} from "./callables";
+
 export const saveCartDraft = async (userId: string, items: any[]): Promise<void> => {
   try {
     await setDoc(doc(db, "carts", userId), {
@@ -84,11 +99,24 @@ const orderToFirestore = (order: Order) => ({
   createdAt: Timestamp.fromMillis(order.createdAt),
   scannedAt: order.scannedAt ? Timestamp.fromMillis(order.scannedAt) : null,
   servedAt: order.servedAt ? Timestamp.fromMillis(order.servedAt) : null,
+  kitchenStatus: order.kitchenStatus || 'PLACED',
+  qrState: order.qrState || null,
+  qrScannedAt: order.qrScannedAt ? Timestamp.fromMillis(order.qrScannedAt) : null,
+  qrExpiresAt: order.qrExpiresAt ? Timestamp.fromMillis(order.qrExpiresAt) : null,
   cafeteriaId: order.cafeteriaId,
   confirmedBy: order.confirmedBy || null,
   confirmedAt: order.confirmedAt ? Timestamp.fromMillis(order.confirmedAt) : null,
   rejectedBy: order.rejectedBy || null,
-  rejectedAt: order.rejectedAt ? Timestamp.fromMillis(order.rejectedAt) : null
+  rejectedAt: order.rejectedAt ? Timestamp.fromMillis(order.rejectedAt) : null,
+  orderType: order.orderType || null,
+  serveFlowStatus: order.serveFlowStatus || null,
+  pickupWindowStart: order.pickupWindowStart != null ? Timestamp.fromMillis(order.pickupWindowStart) : null,
+  pickupWindowEnd: order.pickupWindowEnd != null ? Timestamp.fromMillis(order.pickupWindowEnd) : null,
+  estimatedReadyTime: order.estimatedReadyTime != null ? Timestamp.fromMillis(order.estimatedReadyTime) : null,
+  sentPickupReminderAt: order.sentPickupReminderAt != null ? Timestamp.fromMillis(order.sentPickupReminderAt) : null,
+  preparationStationId: order.preparationStationId || null,
+  queuePosition: order.queuePosition ?? null,
+  estimatedQueueStartTime: order.estimatedQueueStartTime != null ? Timestamp.fromMillis(order.estimatedQueueStartTime) : null,
 });
 
 const firestoreToOrder = (id: string, data: any): Order => {
@@ -123,11 +151,24 @@ const firestoreToOrder = (id: string, data: any): Order => {
     createdAt: toMillis(data.createdAt) || Date.now(),
     scannedAt: toMillis(data.scannedAt),
     servedAt: toMillis(data.servedAt),
+    kitchenStatus: data.kitchenStatus || 'PLACED',
+    qrState: data.qrState,
+    qrScannedAt: toMillis(data.qrScannedAt),
+    qrExpiresAt: toMillis(data.qrExpiresAt),
     cafeteriaId: data.cafeteriaId,
     confirmedBy: data.confirmedBy,
     confirmedAt: toMillis(data.confirmedAt),
     rejectedBy: data.rejectedBy,
-    rejectedAt: toMillis(data.rejectedAt)
+    rejectedAt: toMillis(data.rejectedAt),
+    orderType: data.orderType || undefined,
+    serveFlowStatus: data.serveFlowStatus || undefined,
+    pickupWindowStart: toMillis(data.pickupWindowStart),
+    pickupWindowEnd: toMillis(data.pickupWindowEnd),
+    estimatedReadyTime: toMillis(data.estimatedReadyTime),
+    sentPickupReminderAt: toMillis(data.sentPickupReminderAt),
+    preparationStationId: data.preparationStationId || undefined,
+    queuePosition: data.queuePosition ?? undefined,
+    estimatedQueueStartTime: toMillis(data.estimatedQueueStartTime),
   };
 };
 
@@ -332,8 +373,9 @@ export const initializeMenu = async (): Promise<void> => {
       await batch.commit();
       console.log("✅ Menu initialized with default items");
       
-      // Also initialize inventory for menu items
+      // Also initialize inventory + inventory_meta for menu items (inventory_meta for real-time student view)
       const inventoryBatch = writeBatch(db);
+      const LOW_STOCK_DEFAULT = 20;
       INITIAL_MENU.forEach(item => {
         const invRef = doc(db, "inventory", item.id);
         inventoryBatch.set(invRef, {
@@ -344,9 +386,19 @@ export const initializeMenu = async (): Promise<void> => {
           category: item.category,
           lastUpdated: serverTimestamp()
         });
+        const metaRef = doc(db, "inventory_meta", item.id);
+        inventoryBatch.set(metaRef, {
+          itemId: item.id,
+          totalStock: 100,
+          consumed: 0,
+          lowStockThreshold: LOW_STOCK_DEFAULT,
+          itemName: item.name,
+          category: item.category,
+          lastUpdated: serverTimestamp()
+        });
       });
       await inventoryBatch.commit();
-      console.log("✅ Inventory initialized for menu items");
+      console.log("✅ Inventory and inventory_meta initialized for menu items");
     }
   } catch (error) {
     console.error("Error initializing menu:", error);
@@ -399,24 +451,35 @@ export const updateInventory = async (itemId: string, consumed: number): Promise
 };
 
 export const updateInventoryItem = async (itemId: string, data: Partial<InventoryItem>): Promise<void> => {
+  if (useCallables()) {
+    try {
+      await updateInventoryCallable({
+        itemId,
+        itemName: data.itemName,
+        openingStock: data.openingStock,
+        consumed: data.consumed,
+        category: data.category,
+        lowStockThreshold: (data as { lowStockThreshold?: number }).lowStockThreshold,
+      });
+      return;
+    } catch (err: any) {
+      console.error("Error updating inventory (callable):", err);
+      throw err;
+    }
+  }
   try {
     const invRef = doc(db, "inventory", itemId);
     const invSnap = await getDoc(invRef);
-    
     if (invSnap.exists()) {
-      await updateDoc(invRef, {
-        ...data,
-        lastUpdated: serverTimestamp()
-      });
+      await updateDoc(invRef, { ...data, lastUpdated: serverTimestamp() });
     } else {
-      // Create inventory item if it doesn't exist
       await setDoc(invRef, {
         itemId,
         itemName: data.itemName || '',
         openingStock: data.openingStock || 0,
         consumed: data.consumed || 0,
         category: data.category || '',
-        lastUpdated: serverTimestamp()
+        lastUpdated: serverTimestamp(),
       });
     }
   } catch (error) {
@@ -454,6 +517,71 @@ export const listenToInventory = (callback: (items: InventoryItem[]) => void): (
 };
 
 // ============================================================================
+// INVENTORY META (real-time stock for students: totalStock, consumed, lowStockThreshold)
+// ============================================================================
+
+/** Real-time inventory_meta listener. Use includeMetadataChanges: false to reduce bandwidth. */
+export const listenToInventoryMeta = (
+  callback: (items: InventoryMetaItem[]) => void,
+  options?: { includeMetadataChanges?: boolean }
+): (() => void) => {
+  const colRef = collection(db, "inventory_meta");
+
+  const onNext = (snapshot: any) => {
+    const items: InventoryMetaItem[] = snapshot.docs.map((d: any) => {
+      const data = d.data();
+      const totalStock = data.totalStock ?? 0;
+      const consumed = data.consumed ?? 0;
+      const lowStockThreshold = data.lowStockThreshold ?? 20;
+      return {
+        itemId: d.id,
+        totalStock,
+        consumed,
+        lowStockThreshold,
+        available:
+          data.available != null
+            ? data.available
+            : Math.max(0, totalStock - consumed),
+        stockStatus: data.stockStatus ?? undefined,
+        itemName: data.itemName,
+        category: data.category,
+      };
+    });
+    callback(items);
+  };
+
+  const onError = (error: any) => {
+    console.error("Error listening to inventory_meta:", error);
+    callback([]);
+  };
+
+  if (options?.includeMetadataChanges) {
+    return onSnapshot(
+      colRef,
+      { includeMetadataChanges: true },
+      onNext,
+      onError
+    );
+  }
+
+  return onSnapshot(colRef, onNext, onError);
+};
+
+/** Derive stock status and available count; prefer cached available/stockStatus when present */
+export function getStockStatus(meta: InventoryMetaItem): { status: StockStatus; available: number } {
+  const available = meta.available != null ? meta.available : Math.max(0, meta.totalStock - meta.consumed);
+  const status: StockStatus =
+    meta.stockStatus != null
+      ? meta.stockStatus
+      : available === 0
+        ? "OUT_OF_STOCK"
+        : available <= meta.lowStockThreshold
+          ? "LOW_STOCK"
+          : "AVAILABLE";
+  return { status, available };
+}
+
+// ============================================================================
 // 3. SETTINGS
 // ============================================================================
 
@@ -467,6 +595,8 @@ export const getSettings = async (): Promise<SystemSettings> => {
     return {
       isMaintenanceMode: false,
       acceptingOrders: true,
+      orderingEnabled: DEFAULT_ORDERING_ENABLED,
+      servingRatePerMin: DEFAULT_SERVING_RATE_PER_MIN,
       announcement: "JOE: New Indian Breakfast Catalog is now LIVE!",
       taxRate: 5,
       minOrderValue: 20,
@@ -478,6 +608,8 @@ export const getSettings = async (): Promise<SystemSettings> => {
     return {
       isMaintenanceMode: false,
       acceptingOrders: true,
+      orderingEnabled: DEFAULT_ORDERING_ENABLED,
+      servingRatePerMin: DEFAULT_SERVING_RATE_PER_MIN,
       announcement: "JOE: New Indian Breakfast Catalog is now LIVE!",
       taxRate: 5,
       minOrderValue: 20,
@@ -488,15 +620,15 @@ export const getSettings = async (): Promise<SystemSettings> => {
 };
 
 export const updateSettings = async (updates: Partial<SystemSettings>): Promise<void> => {
+  const settingsRef = doc(db, "settings", "global");
   try {
-    const settingsRef = doc(db, "settings", "global");
     await updateDoc(settingsRef, {
       ...updates,
       updatedAt: serverTimestamp()
     });
   } catch (error) {
     // If settings don't exist, create them
-    if (error instanceof Error && error.message.includes("No document")) {
+    if (error instanceof Error) {
       await setDoc(settingsRef, {
         ...updates,
         updatedAt: serverTimestamp()
@@ -515,10 +647,11 @@ export const listenToSettings = (callback: (settings: SystemSettings) => void): 
       if (doc.exists()) {
         callback(doc.data() as SystemSettings);
       } else {
-        // Return defaults
         callback({
           isMaintenanceMode: false,
           acceptingOrders: true,
+          orderingEnabled: DEFAULT_ORDERING_ENABLED,
+          servingRatePerMin: DEFAULT_SERVING_RATE_PER_MIN,
           announcement: "JOE: New Indian Breakfast Catalog is now LIVE!",
           taxRate: 5,
           minOrderValue: 20,
@@ -532,6 +665,8 @@ export const listenToSettings = (callback: (settings: SystemSettings) => void): 
       callback({
         isMaintenanceMode: false,
         acceptingOrders: true,
+        orderingEnabled: DEFAULT_ORDERING_ENABLED,
+        servingRatePerMin: DEFAULT_SERVING_RATE_PER_MIN,
         announcement: "JOE: New Indian Breakfast Catalog is now LIVE!",
         taxRate: 5,
         minOrderValue: 20,
@@ -542,11 +677,155 @@ export const listenToSettings = (callback: (settings: SystemSettings) => void): 
   );
 };
 
+/** Fail-safe: whether new orders are allowed (from settings) */
+export const getOrderingEnabled = async (): Promise<boolean> => {
+  const s = await getSettings();
+  return s.orderingEnabled !== false;
+};
+
+/**
+ * Estimated wait time in minutes: pending_orders / serving_rate.
+ * Pending = orders in ACTIVE/PLACED/COOKING/READY (not yet COMPLETED).
+ */
+export const getQueueEstimate = async (): Promise<{ minutes: number; pendingCount: number }> => {
+  try {
+    const settings = await getSettings();
+    const rate = settings.servingRatePerMin ?? DEFAULT_SERVING_RATE_PER_MIN;
+    const snap = await getDocs(
+      query(
+        collection(db, "orders"),
+        where("orderStatus", "in", ["PENDING", "ACTIVE"]),
+        limit(200)
+      )
+    );
+    const pendingCount = snap.docs.filter((d) => {
+      const o = d.data();
+      return o.paymentStatus !== "REJECTED" && o.orderStatus !== "CANCELLED";
+    }).length;
+    const minutes = rate > 0 ? Math.max(0, Math.ceil(pendingCount / rate)) : 0;
+    return { minutes, pendingCount };
+  } catch (e) {
+    console.warn("getQueueEstimate failed:", e);
+    return { minutes: 0, pendingCount: 0 };
+  }
+};
+
+/**
+ * Aggregated inventory: from inventory doc + sum of inventory_shards for that item.
+ * Use for admin dashboard when shards exist.
+ */
+export const getAggregatedInventory = async (): Promise<InventoryItem[]> => {
+  try {
+    const invSnap = await getDocs(collection(db, "inventory"));
+    const toMillis = (ts: any): number => {
+      if (!ts) return Date.now();
+      if (typeof ts.toMillis === "function") return ts.toMillis();
+      if (typeof ts === "number") return ts;
+      return Date.now();
+    };
+    const items: InventoryItem[] = [];
+    for (const d of invSnap.docs) {
+      const itemId = d.id;
+      const data = d.data();
+      let consumed = data.consumed ?? 0;
+      try {
+        const shardsSnap = await getDocs(collection(db, "inventory_shards", itemId, "shards"));
+        shardsSnap.docs.forEach((s) => {
+          consumed += s.data().count ?? 0;
+        });
+      } catch (_) {
+        // no shards
+      }
+      items.push({
+        itemId,
+        itemName: data.itemName ?? "",
+        openingStock: data.openingStock ?? 0,
+        consumed,
+        lastUpdated: toMillis(data.lastUpdated),
+        category: data.category ?? ""
+      } as InventoryItem);
+    }
+    return items;
+  } catch (error) {
+    console.error("Error getAggregatedInventory:", error);
+    return [];
+  }
+};
+
+/** Update kitchen workflow state (PLACED → COOKING → READY → SERVED). Server/admin only via Callable. */
+export const updateKitchenStatus = async (orderId: string, kitchenStatus: KitchenStatus): Promise<void> => {
+  if (useCallables()) {
+    await updateKitchenStatusCallable({ orderId, kitchenStatus });
+    return;
+  }
+  await updateDoc(doc(db, "orders", orderId), { kitchenStatus });
+};
+
+/** Zero-wait: update serve flow (NEW→PREPARING→READY). Server only. */
+export const updateServeFlowStatus = async (orderId: string, serveFlowStatus: 'PREPARING' | 'READY'): Promise<void> => {
+  if (useCallables()) {
+    await updateServeFlowStatusCallable({ orderId, serveFlowStatus });
+    return;
+  }
+  await updateDoc(doc(db, "orders", orderId), { serveFlowStatus, serveFlowUpdatedAt: serverTimestamp() });
+};
+
+/** Listen to preparation orders only (for server dashboard). Excludes FAST_ITEM. */
+export const listenToPreparationOrders = (callback: (orders: Order[]) => void, limitCount: number = 80): (() => void) => {
+  return onSnapshot(
+    query(
+      collection(db, "orders"),
+      where("orderType", "==", "PREPARATION_ITEM"),
+      where("serveFlowStatus", "in", ["NEW", "QUEUED", "PREPARING", "READY"]),
+      orderBy("createdAt", "desc"),
+      limit(limitCount)
+    ),
+    (snapshot) => {
+      const orders = snapshot.docs.map((d) => firestoreToOrder(d.id, d.data()));
+      callback(orders.filter((o) => o.paymentStatus !== "REJECTED" && o.orderStatus !== "CANCELLED"));
+    },
+    (error) => {
+      console.error("Error listening to preparation orders:", error);
+      callback([]);
+    }
+  );
+};
+
 // ============================================================================
 // 4. ORDERING SYSTEM (REAL-TIME)
 // ============================================================================
 
 export const createOrder = async (orderData: Omit<Order, 'id' | 'createdAt'>): Promise<string> => {
+  if (useCallables()) {
+    try {
+      const { data } = await createOrderCallable({
+        userId: orderData.userId,
+        userName: orderData.userName,
+        items: orderData.items.map((item) => ({
+          id: item.id,
+          name: item.name,
+          price: item.price,
+          quantity: item.quantity,
+          costPrice: item.costPrice,
+          category: item.category,
+          imageUrl: item.imageUrl,
+        })),
+        totalAmount: orderData.totalAmount,
+        paymentType: orderData.paymentType,
+        paymentStatus: orderData.paymentStatus,
+        cafeteriaId: orderData.cafeteriaId,
+      });
+      try {
+        const { invalidateReportsCache } = await import('./reporting');
+        invalidateReportsCache();
+      } catch (_e) {}
+      return (data as { orderId: string }).orderId;
+    } catch (err: any) {
+      const msg = err?.message || err?.code || String(err);
+      console.error("Error creating order (callable):", err);
+      throw err?.code === 'functions/unauthenticated' ? new Error('Please sign in to place an order.') : new Error(msg);
+    }
+  }
   try {
     const id = 'order_' + Math.random().toString(36).substr(2, 9);
     const createdAt = Date.now();
@@ -555,7 +834,6 @@ export const createOrder = async (orderData: Omit<Order, 'id' | 'createdAt'>): P
       servedQty: 0,
       remainingQty: item.quantity
     }));
-    
     const newOrder: Order = {
       ...orderData,
       items: itemsWithQty,
@@ -563,32 +841,21 @@ export const createOrder = async (orderData: Omit<Order, 'id' | 'createdAt'>): P
       createdAt,
       orderStatus: 'PENDING'
     } as Order;
-
-    // If payment is already SUCCESS, attach QR now
     if (newOrder.paymentStatus === 'SUCCESS') {
       newOrder.qrStatus = 'ACTIVE';
       const token = generateQRPayloadSync(newOrder);
       newOrder.qr = { token, status: 'ACTIVE', createdAt };
     }
-
     await setDoc(doc(db, "orders", id), orderToFirestore(newOrder));
-    console.log('✅ Order created in Firestore:', id);
     try {
       const { invalidateReportsCache } = await import('./reporting');
       invalidateReportsCache();
-    } catch (e) {
-      // optional cache clear
-    }
+    } catch (_e) {}
     return id;
   } catch (error: any) {
-    // Enhanced error handling for network failures
     if (error.code === 'unavailable' || error.code === 'deadline-exceeded') {
-      // Network error - order may still be created (Firestore offline persistence)
-      // Log warning but don't fail - let Firestore retry
       console.warn("Network error during order creation (order may be queued):", error);
-      // Return order ID optimistically - Firestore will sync when online
-      const id = 'order_' + Math.random().toString(36).substr(2, 9);
-      return id;
+      return 'order_' + Math.random().toString(36).substr(2, 9);
     }
     console.error("Error creating order:", error);
     throw error;
@@ -639,6 +906,21 @@ export const listenToAllOrders = (callback: (orders: Order[]) => void): (() => v
     },
     (error) => {
       console.error("Error listening to orders:", error);
+      callback([]);
+    }
+  );
+};
+
+/** Paginated recent orders (e.g. for kitchen dashboard). Limit 50. */
+export const listenToRecentOrders = (callback: (orders: Order[]) => void, limitCount: number = 50): (() => void) => {
+  return onSnapshot(
+    query(collection(db, "orders"), orderBy("createdAt", "desc"), limit(limitCount)),
+    (snapshot) => {
+      const orders = snapshot.docs.map(doc => firestoreToOrder(doc.id, doc.data()));
+      callback(orders);
+    },
+    (error) => {
+      console.error("Error listening to recent orders:", error);
       callback([]);
     }
   );
@@ -719,18 +1001,27 @@ export const listenToPendingCashOrders = (callback: (orders: Order[]) => void): 
   );
 };
 
-export const confirmCashPayment = async (orderId: string, cashierUid: string): Promise<void> => {
+export const confirmCashPayment = async (orderId: string, _cashierUid: string): Promise<void> => {
+  if (useCallables()) {
+    try {
+      await confirmPaymentCallable({ orderId });
+      try {
+        const { invalidateReportsCache } = await import('./reporting');
+        invalidateReportsCache();
+      } catch (_e) {}
+      return;
+    } catch (err: any) {
+      console.error("Error confirming cash payment (callable):", err);
+      throw err?.message?.includes?.('ALREADY') ? new Error("Order already confirmed") : err;
+    }
+  }
   try {
     const orderRef = doc(db, "orders", orderId);
     await runTransaction(db, async (tx) => {
       const orderSnap = await tx.get(orderRef);
-      if (!orderSnap.exists()) {
-        throw new Error("Order not found");
-      }
+      if (!orderSnap.exists()) throw new Error("Order not found");
       const orderData = orderSnap.data();
-      if (orderData.paymentStatus === 'SUCCESS') {
-        throw new Error("Order already confirmed");
-      }
+      if (orderData.paymentStatus === 'SUCCESS') throw new Error("Order already confirmed");
       const createdAtMillis = (orderData.createdAt?.toMillis?.() ?? Date.now());
       const tempOrder: Order = {
         id: orderId,
@@ -745,62 +1036,58 @@ export const confirmCashPayment = async (orderId: string, cashierUid: string): P
         createdAt: createdAtMillis,
         cafeteriaId: orderData.cafeteriaId || 'main'
       } as Order;
-
       const token = generateQRPayloadSync(tempOrder);
-
       tx.update(orderRef, {
         paymentStatus: 'SUCCESS',
         qrStatus: 'ACTIVE',
-        qr: {
-          token,
-          status: 'ACTIVE',
-          createdAt: serverTimestamp()
-        },
-        confirmedBy: cashierUid,
+        qr: { token, status: 'ACTIVE', createdAt: serverTimestamp() },
+        confirmedBy: _cashierUid,
         confirmedAt: serverTimestamp()
       });
     });
-    console.log('✅ Cash payment confirmed:', orderId);
     try {
       const { invalidateReportsCache } = await import('./reporting');
       invalidateReportsCache();
-    } catch (e) {
-      // optional
-    }
+    } catch (_e) {}
   } catch (error) {
     console.error("Error confirming cash payment:", error);
     throw error;
   }
 };
 
-export const rejectCashPayment = async (orderId: string, cashierUid: string): Promise<void> => {
+export const rejectCashPayment = async (orderId: string, _cashierUid: string): Promise<void> => {
+  if (useCallables()) {
+    try {
+      await rejectPaymentCallable({ orderId });
+      try {
+        const { invalidateReportsCache } = await import('./reporting');
+        invalidateReportsCache();
+      } catch (_e) {}
+      return;
+    } catch (err: any) {
+      console.error("Error rejecting cash payment (callable):", err);
+      throw err?.message?.includes?.('ALREADY') ? new Error("ALREADY_PROCESSED") : err;
+    }
+  }
   try {
     const orderRef = doc(db, "orders", orderId);
     await runTransaction(db, async (tx) => {
       const orderSnap = await tx.get(orderRef);
-      if (!orderSnap.exists()) {
-        throw new Error("Order not found");
-      }
+      if (!orderSnap.exists()) throw new Error("Order not found");
       const orderData = orderSnap.data();
-      if (orderData.paymentStatus !== 'PENDING') {
-        throw new Error("ALREADY_PROCESSED");
-      }
-
+      if (orderData.paymentStatus !== 'PENDING') throw new Error("ALREADY_PROCESSED");
       tx.update(orderRef, {
         paymentStatus: 'REJECTED',
         orderStatus: 'CANCELLED',
         rejectedAt: serverTimestamp(),
-        rejectedBy: cashierUid,
+        rejectedBy: _cashierUid,
         qrStatus: 'REJECTED'
       });
     });
-    console.log('✅ Cash payment rejected:', orderId);
     try {
       const { invalidateReportsCache } = await import('./reporting');
       invalidateReportsCache();
-    } catch (e) {
-      // optional
-    }
+    } catch (_e) {}
   } catch (error) {
     console.error("Error rejecting cash payment:", error);
     throw error;
@@ -882,159 +1169,110 @@ export const listenToPendingItems = (callback: (items: PendingItem[]) => void): 
   );
 };
 
-export const validateQRForServing = async (qrDataRaw: string): Promise<Order> => {
-  let payload;
+export const validateQRForServing = async (qrData: string): Promise<Order> => {
+  console.log('🌐 [SERVICE] Validating QR via backend API...', { length: qrData.length });
+  
   try {
-    if (typeof qrDataRaw === 'string') {
-      payload = JSON.parse(qrDataRaw);
-    } else {
-      payload = qrDataRaw;
-    }
-  } catch {
-    const parsed = parseQRPayload(qrDataRaw);
-    if (!parsed) {
-      throw new Error("Invalid Token Format - Cannot parse QR data");
-    }
-    payload = parsed;
-  }
-
-  if (!payload || typeof payload !== 'object') {
-    throw new Error("Invalid Token Format - Invalid payload structure");
-  }
-
-  const { orderId, userId, cafeteriaId, secureHash, expiresAt, createdAt } = payload;
-
-  if (!orderId || !userId || !cafeteriaId || !secureHash) {
-    throw new Error("Invalid Token Format - Missing required fields");
-  }
-
-  // Check expiry FIRST (fail fast)
-  if (expiresAt && Date.now() > expiresAt) {
-    throw new Error("QR_CODE_EXPIRED - This QR code has expired. Please request a new one.");
-  }
-
-  // Fetch order with retry logic for network errors
-  let orderDoc;
-  let retries = 0;
-  const maxRetries = 3;
-  
-  while (retries < maxRetries) {
+    let payload: any = {};
     try {
-      orderDoc = await getDoc(doc(db, "orders", orderId));
-      break; // Success, exit retry loop
-    } catch (networkError: any) {
-      retries++;
-      if (retries >= maxRetries) {
-        console.error('❌ Network error fetching order after', maxRetries, 'retries:', networkError);
-        throw new Error(`Network Error - Failed to fetch order. Please check your internet connection and try again. Order ID: ${orderId}`);
+      // Check if it's a JSON object (orderId, etc.)
+      const parsed = JSON.parse(qrData);
+      if (typeof parsed === 'object' && (parsed.orderId || parsed.qrToken)) {
+        payload = parsed;
+      } else {
+        payload = { scannedData: qrData };
       }
-      // Wait before retry (exponential backoff)
-      await new Promise(resolve => setTimeout(resolve, 1000 * retries));
-      console.warn(`⚠️ Network error fetching order, retry ${retries}/${maxRetries}...`);
+    } catch {
+      // If not JSON, it's either a raw UUID-like token or encrypted data
+      // Encrypted data usually contains ':' separator for IV
+      if (qrData.includes(':') || qrData.length > 50) {
+        payload = { scannedData: qrData };
+      } else {
+        payload = { qrToken: qrData };
+      }
     }
-  }
-  
-  if (!orderDoc || !orderDoc.exists()) {
-    throw new Error(`Order not found: ${orderId}. Please ensure the order exists and payment is confirmed.`);
-  }
 
-  const order = firestoreToOrder(orderDoc.id, orderDoc.data());
-
-  // Use order's createdAt if payload doesn't have it (legacy QR codes)
-  const qrCreatedAt = createdAt || order.createdAt;
-  const qrExpiresAt = expiresAt || (qrCreatedAt + (24 * 60 * 60 * 1000)); // Default 24h if not specified
-
-  // Verify signature (async HMAC-SHA256)
-  const isValid = await verifySecureHash(
-    orderId, 
-    userId, 
-    cafeteriaId, 
-    qrCreatedAt,
-    qrExpiresAt,
-    secureHash
-  );
-
-  if (!isValid) {
-    // Fallback to sync verification for legacy QR codes
-    const isValidSync = verifySecureHashSync(
-      orderId, 
-      userId, 
-      cafeteriaId, 
-      qrCreatedAt,
-      qrExpiresAt,
-      secureHash
-    );
+    const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000/api/v1';
     
-    if (!isValidSync) {
-      throw new Error("Invalid Token Signature - Hash verification failed");
+    // In production, we should include the user's access token if available
+    const response = await fetch(`${API_BASE_URL}/qr/validate`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload)
+    });
+
+    const result = await response.json();
+
+    if (!response.ok) {
+      console.warn('⚠️ [BACKEND] QR Validation failed:', result.message);
+      throw new Error(result.message || 'QR Validation failed');
     }
+
+    console.log('✅ [BACKEND] QR Validated successfully');
+    
+    // Map backend response to frontend Order type
+    const order: Order = {
+      id: result.data.order.id,
+      userId: '', 
+      userName: result.data.order.userName,
+      items: result.data.order.items.map((it: any) => ({
+        id: it.itemId || it.id,
+        name: it.name || 'Item',
+        quantity: it.quantity || 1,
+        price: it.price || 0,
+        costPrice: 0,
+        category: 'Snacks', // Default to valid category
+        imageUrl: '',
+        active: true
+      })),
+      totalAmount: 0,
+      paymentStatus: 'SUCCESS',
+      paymentType: 'UPI',
+      orderStatus: result.data.order.status as any,
+      qrStatus: 'USED',
+      cafeteriaId: 'MAIN_CAFE', 
+      createdAt: Date.now()
+    };
+
+    // SYNC BRIDGE: Update Firestore so the local listeners see the order as ACTIVE/USED
+    // This allows the "readyItems" list to populate even if we scanned via PostgreSQL backend
+    try {
+      const { doc, updateDoc, serverTimestamp } = await import('firebase/firestore');
+      const { db } = await import('../firebase');
+      const orderRef = doc(db, "orders", order.id);
+      await updateDoc(orderRef, {
+        orderStatus: 'ACTIVE',
+        qrStatus: 'USED',
+        scannedAt: serverTimestamp(),
+        updatedAt: serverTimestamp()
+      });
+      console.log('🔄 [SYNC] Firestore updated for real-time list sync');
+    } catch (syncErr) {
+      console.warn('⚠️ [SYNC] Firestore sync failed (ignore if order is Postgres-only):', syncErr);
+    }
+
+    return order;
+  } catch (error: any) {
+    console.error('❌ [SERVICE] validateQRForServing error:', error);
+    if (error.message?.includes('Failed to fetch')) {
+      throw new Error('Network Error - Backend server is unreachable. Please check your connection.');
+    }
+    throw error;
   }
-
-  if (order.paymentStatus !== 'SUCCESS') {
-    throw new Error("PAYMENT_NOT_VERIFIED");
-  }
-
-  if (order.qrStatus === 'USED') {
-    throw new Error("TOKEN_ALREADY_USED - This QR code has already been scanned.");
-  }
-
-  if (order.qrStatus === 'EXPIRED') {
-    throw new Error("QR_CODE_EXPIRED - This QR code has expired.");
-  }
-
-  if (order.qrStatus !== 'ACTIVE') {
-    throw new Error("QR_NOT_ACTIVE");
-  }
-
-  if (order.orderStatus === 'COMPLETED') {
-    throw new Error("Order Already Completed");
-  }
-
-  // Update order to USED and ACTIVE
-  const itemsWithQty = order.items.map(item => ({
-    ...item,
-    servedQty: item.servedQty || 0,
-    remainingQty: item.remainingQty !== undefined ? item.remainingQty : item.quantity
-  }));
-
-  await updateDoc(doc(db, "orders", orderId), {
-    qrStatus: 'USED',
-    orderStatus: 'ACTIVE',
-    scannedAt: serverTimestamp(),
-    items: itemsWithQty.map(item => ({
-      id: item.id,
-      name: item.name,
-      price: item.price,
-      costPrice: item.costPrice,
-      category: item.category,
-      imageUrl: item.imageUrl,
-      quantity: item.quantity,
-      servedQty: item.servedQty || 0,
-      remainingQty: item.remainingQty !== undefined ? item.remainingQty : item.quantity
-    }))
-  });
-
-  // Log scan
-  await setDoc(doc(collection(db, "scanLogs")), {
-    orderId,
-    userId: order.userId,
-    userName: order.userName,
-    scannedBy: 'server',
-    scanTime: serverTimestamp(),
-    scanResult: 'SUCCESS',
-    totalAmount: order.totalAmount
-  });
-
-  return {
-    ...order,
-    qrStatus: 'USED' as QRStatus,
-    orderStatus: 'ACTIVE' as OrderStatus,
-    items: itemsWithQty,
-    scannedAt: Date.now()
-  };
 };
 
 export const serveItem = async (orderId: string, itemId: string, servedBy: string): Promise<void> => {
+  if (useCallables()) {
+    try {
+      await serveItemCallable({ orderId, itemId, servedBy });
+      return;
+    } catch (err: any) {
+      console.error("Error serving item (callable):", err);
+      throw err;
+    }
+  }
   try {
     const orderRef = doc(db, "orders", orderId);
     const serveLogsRef = collection(db, "serveLogs");
@@ -1148,7 +1386,8 @@ export const scanAndServeOrder = async (qrDataRaw: string, scannedBy: string = '
 
     const order = firestoreToOrder(orderDoc.id, orderDoc.data());
 
-    if (!verifySecureHash(orderId, userId, cafeteriaId, order.createdAt, secureHash)) {
+    const qrExpiresAt = order.createdAt + 24 * 60 * 60 * 1000;
+    if (!verifySecureHash(orderId, userId, cafeteriaId, order.createdAt, qrExpiresAt, secureHash)) {
       throw new Error("Invalid Token Signature");
     }
 
@@ -1292,6 +1531,62 @@ export const getServeLogs = async (limitCount: number = 100): Promise<ServeLog[]
     } as ServeLog));
   } catch (error) {
     console.error("Error getting serve logs:", error);
+    return [];
+  }
+};
+
+/** Daily consumption per item (from serveLogs since start of today). For admin dashboard. */
+export const getDailyConsumptionByItem = async (): Promise<Record<string, number>> => {
+  try {
+    const startOfDay = new Date();
+    startOfDay.setHours(0, 0, 0, 0);
+    const startTs = Timestamp.fromDate(startOfDay);
+    const snapshot = await getDocs(
+      query(
+        collection(db, "serveLogs"),
+        where("servedAt", ">=", startTs),
+        limit(5000)
+      )
+    );
+    const byItem: Record<string, number> = {};
+    snapshot.docs.forEach((d) => {
+      const data = d.data();
+      const id = data.itemId || "";
+      const qty = data.quantityServed ?? 1;
+      byItem[id] = (byItem[id] || 0) + qty;
+    });
+    return byItem;
+  } catch (error) {
+    console.error("Error getDailyConsumptionByItem:", error);
+    return {};
+  }
+};
+
+/** Popular menu items by order quantity (recent orders). For admin dashboard. */
+export const getPopularMenuItems = async (limitOrders: number = 500): Promise<{ itemId: string; itemName?: string; quantity: number }[]> => {
+  try {
+    const snapshot = await getDocs(
+      query(
+        collection(db, "orders"),
+        orderBy("createdAt", "desc"),
+        limit(limitOrders)
+      )
+    );
+    const byItem: Record<string, { quantity: number; itemName?: string }> = {};
+    snapshot.docs.forEach((d) => {
+      const data = d.data();
+      (data.items || []).forEach((item: { id?: string; name?: string; quantity?: number }) => {
+        const id = item.id || "";
+        const qty = item.quantity ?? 1;
+        if (!byItem[id]) byItem[id] = { quantity: 0, itemName: item.name };
+        byItem[id].quantity += qty;
+      });
+    });
+    return Object.entries(byItem)
+      .map(([itemId, v]) => ({ itemId, itemName: v.itemName, quantity: v.quantity }))
+      .sort((a, b) => b.quantity - a.quantity);
+  } catch (error) {
+    console.error("Error getPopularMenuItems:", error);
     return [];
   }
 };

@@ -2,7 +2,7 @@
 import React, { useState, useEffect } from 'react';
 import { ChevronLeft, CreditCard, Smartphone, Landmark, Banknote, ShieldCheck, Loader2, CheckCircle2, Clock } from 'lucide-react';
 import { UserProfile, CartItem } from '../../types';
-import { createOrder, listenToOrder, getOrder } from '../../services/firestore-db';
+import { createOrder, listenToOrder, getOrder, getOrderingEnabled } from '../../services/firestore-db';
 
 interface PaymentViewProps {
   profile: UserProfile | null;
@@ -17,6 +17,7 @@ const PaymentView: React.FC<PaymentViewProps> = ({ profile, onBack, onSuccess })
   const [orderId, setOrderId] = useState<string | null>(null);
   const [orderStatus, setOrderStatus] = useState<'PENDING' | 'APPROVED' | null>(null);
   const [rejectionMessage, setRejectionMessage] = useState<string>('');
+  const [orderingDisabled, setOrderingDisabled] = useState<boolean>(false);
 
   // Load cart and restore pending order state
   useEffect(() => {
@@ -28,6 +29,10 @@ const PaymentView: React.FC<PaymentViewProps> = ({ profile, onBack, onSuccess })
         console.error("Cart parse error", e);
       }
     }
+  }, []);
+
+  useEffect(() => {
+    getOrderingEnabled().then((enabled) => setOrderingDisabled(!enabled)).catch(() => setOrderingDisabled(false));
   }, []);
   
   // Listener for cash payment confirmation - automatically navigate to QR when approved
@@ -144,6 +149,27 @@ const PaymentView: React.FC<PaymentViewProps> = ({ profile, onBack, onSuccess })
     } catch (err: any) {
       console.error('❌ Payment processing error:', err);
       setState('IDLE');
+      const msg = (err?.message || err?.code || '').toString();
+      if (msg.includes('ORDERING_DISABLED')) {
+        alert('Ordering is temporarily disabled. Please try again later.');
+        return;
+      }
+      if (msg.includes('OUT_OF_STOCK') || msg.toLowerCase().includes('out of stock')) {
+        alert('Item is currently out of stock. Please remove it from your cart and try again.');
+        return;
+      }
+      if (msg.includes('BURST_LIMIT')) {
+        alert('Order limit exceeded. Maximum 25 different items and 10 per item. Please reduce your cart.');
+        return;
+      }
+      if (msg.includes('RATE_LIMIT') || msg.includes('5 seconds')) {
+        alert('Please wait at least 5 seconds between orders.');
+        return;
+      }
+      if (msg.includes('MAX_ACTIVE_ORDERS')) {
+        alert('You can have at most 3 active orders. Complete or cancel one first.');
+        return;
+      }
       alert("Order creation failed. Please try again.");
     }
   };
@@ -342,13 +368,16 @@ const PaymentView: React.FC<PaymentViewProps> = ({ profile, onBack, onSuccess })
 
       {/* Footer */}
       <div className="p-6 bg-white border-t space-y-4">
+        {orderingDisabled && (
+          <p className="text-amber-600 text-sm font-bold text-center">Ordering is temporarily disabled.</p>
+        )}
         <div className="flex items-center justify-center gap-2 text-[10px] text-textSecondary font-bold uppercase tracking-widest">
           <ShieldCheck className="w-4 h-4 text-primary" />
           Secured by JOE Payment Node
         </div>
         <button
           onClick={handlePayment}
-          disabled={cart.length === 0}
+          disabled={cart.length === 0 || state === 'PROCESSING' || orderingDisabled}
           className="w-full bg-primary text-white font-bold py-5 rounded-2xl shadow-xl shadow-primary/20 active:scale-95 transition-all disabled:opacity-50"
           autoComplete="off"
           data-lpignore="true"

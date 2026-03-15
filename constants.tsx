@@ -28,3 +28,79 @@ export const INITIAL_MENU: MenuItem[] = [
 ];
 
 export const CATEGORIES = ['Breakfast', 'Lunch', 'Snacks', 'Beverages'] as const;
+
+/** Number of shards per item for distributed inventory (avoid write hotspot) */
+export const INVENTORY_SHARD_COUNT = 10;
+/** QR code validity in minutes (server enforces) */
+export const QR_EXPIRY_MINUTES = 30;
+/** Default for settings.orderingEnabled (fail-safe toggle) */
+export const DEFAULT_ORDERING_ENABLED = true;
+/** Default orders per minute for queue wait estimate */
+export const DEFAULT_SERVING_RATE_PER_MIN = 10;
+
+// --- Zero-wait cafeteria: order types & pickup window ---
+/** Categories that are FAST_ITEM (plate/rice meals, one per order). Others = PREPARATION_ITEM */
+export const FAST_ITEM_CATEGORIES: readonly string[] = ['Lunch'];
+/** Pickup window length in minutes (after estimated ready time) */
+export const PICKUP_WINDOW_MINUTES = 2;
+/** Default prep time (seconds) per item when not in PREP_TIME_BY_ITEM. Key = item id or lowercase name substring */
+export const DEFAULT_PREP_TIME_SECONDS = 45;
+/** Preparation time in seconds by item id (or name substring). Used for pickup window calculation */
+export const PREP_TIME_BY_ITEM: Record<string, number> = {
+  '3': 45,  // Classic Masala Dosa
+  '4': 30,  // Ghee Podi Dosa - plain style
+  '10': 60, // Onion Uttapam
+  '1': 30, '2': 30, '5': 45, '6': 45, '7': 45, '8': 30, '9': 45,
+  '11': 0, '12': 0, // Lunch = fast, no prep
+  '13': 20, '14': 15, // Beverages
+};
+
+// --- Server dashboard: bilingual (English / Kannada) ---
+export const SERVER_LABELS = {
+  startPreparing: { en: 'Start Preparing', kn: 'ತಯಾರಿಸಲು ಪ್ರಾರಂಭಿಸಿ' },
+  ready: { en: 'Ready', kn: 'ಸಿದ್ಧವಾಗಿದೆ' },
+  serve: { en: 'Serve', kn: 'ಪೂರೈಸಿ' },
+  new: { en: 'New', kn: 'ಹೊಸ' },
+  queued: { en: 'Queued', kn: 'ಸಾಲದಲ್ಲಿ' },
+  nextInQueue: { en: 'Next', kn: 'ಮುಂದೆ' },
+  preparing: { en: 'Preparing', kn: 'ತಯಾರಾಗುತ್ತಿದೆ' },
+  readyStatus: { en: 'Ready for Pickup', kn: 'ಪಿಕಪ್‌ಗೆ ಸಿದ್ಧ' },
+  pickupWindow: { en: 'Pickup', kn: 'ಪಿಕಪ್' },
+  queuePos: { en: 'Queue', kn: 'ಸಾಲ' },
+  minLeft: { en: 'min left', kn: 'ನಿಮಿಷ ಉಳಿದಿದೆ' },
+} as const;
+
+// --- Smart kitchen: preparation stations (slot control) ---
+export interface PreparationStationConfig {
+  id: string;
+  maxConcurrentPreparation: number;
+  name: string;
+  nameKn: string;
+  /** Average prep time (seconds) for queue delay estimate when QUEUED */
+  avgPrepTimeSeconds: number;
+}
+
+/** Station configs keyed by station id. Overridable via Firestore preparationStations/{id}. */
+export const PREPARATION_STATIONS: Record<string, PreparationStationConfig> = {
+  dosa: {
+    id: 'dosa',
+    maxConcurrentPreparation: 3,
+    name: 'Dosa Station',
+    nameKn: 'ದೋಸೆ ಸ್ಟೇಷನ್',
+    avgPrepTimeSeconds: 45,
+  },
+  default: {
+    id: 'default',
+    maxConcurrentPreparation: 3,
+    name: 'Preparation',
+    nameKn: 'ತಯಾರಿ',
+    avgPrepTimeSeconds: 45,
+  },
+};
+
+/** Map menu item id → preparation station id. Items not listed use "default". */
+export const STATION_ID_BY_ITEM_ID: Record<string, string> = {
+  '3': 'dosa',  // Classic Masala Dosa
+  '4': 'dosa',  // Ghee Podi Dosa
+  '10': 'dosa', // Onion Uttapam
+};

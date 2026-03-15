@@ -1,0 +1,631 @@
+================================================================================
+  JOE CAFETERIA — FIREBASE BACKEND IMPLEMENTATION SUMMARY
+  Project: joecafe-a7fff   |   Generated: 2026-03-15
+================================================================================
+
+--------------------------------------------------------------------------------
+1. FIREBASE PROJECT OVERVIEW
+--------------------------------------------------------------------------------
+
+Project ID      : joecafe-a7fff
+Project Name    : JOECafe
+Region          : us-central1
+Firebase Plan   : Spark (Free) — v1 Launch Mode
+Auth Account    : koushikabhi.dev@gmail.com
+
+Services Used:
+  - Firebase Authentication    (Google Sign-In + Anonymous/Guest)
+  - Cloud Firestore            (primary database, real-time listeners)
+  - Firebase Hosting           (Netlify also configured as alternative)
+  - Firebase Cloud Messaging   (FCM push notifications)
+  - Cloud Functions            (coded, ready — requires Blaze plan to deploy)
+
+--------------------------------------------------------------------------------
+2. OPERATING MODE — v1 FREE MODE
+--------------------------------------------------------------------------------
+
+Current Mode : DIRECT FIRESTORE WRITES  (VITE_USE_CALLABLES=false)
+Future Mode  : CLOUD FUNCTIONS          (VITE_USE_CALLABLES=true, Blaze plan)
+
+How it works:
+  - Frontend writes directly to Firestore collections
+  - Firestore Security Rules enforce who can read/write what
+  - QR codes are generated client-side using HMAC-SHA256
+  - All real-time features work via Firestore onSnapshot listeners
+
+To switch to Cloud Functions (after upgrading Firebase plan):
+  1. Enable billing on GCP (Blaze pay-as-you-go)
+  2. Change .env: VITE_USE_CALLABLES=true
+  3. Run: firebase deploy --only functions
+
+--------------------------------------------------------------------------------
+3. ENVIRONMENT CONFIGURATION (.env)
+--------------------------------------------------------------------------------
+
+VITE_FIREBASE_API_KEY              = AIzaSyBRzOIMBTExHkfM92EMNfCodh63t54OKSw
+VITE_FIREBASE_AUTH_DOMAIN          = joecafe-a7fff.firebaseapp.com
+VITE_FIREBASE_PROJECT_ID           = joecafe-a7fff
+VITE_FIREBASE_STORAGE_BUCKET       = joecafe-a7fff.firebasestorage.app
+VITE_FIREBASE_MESSAGING_SENDER_ID  = 1034738714307
+VITE_FIREBASE_APP_ID               = 1:1034738714307:web:95e1f52bfa57a101ae8476
+VITE_FIREBASE_MEASUREMENT_ID       = G-BSF8C3H6S4
+VITE_USE_CALLABLES                 = false    (free mode — direct Firestore writes)
+VITE_USE_FUNCTIONS_EMULATOR        = false
+
+VITE_FIREBASE_VAPID_KEY            = (not set — FCM push notifications disabled)
+                                     Add from: Firebase Console > Project Settings
+                                     > Cloud Messaging > Web Push Certificate
+
+--------------------------------------------------------------------------------
+4. FIRESTORE DATABASE SCHEMA
+--------------------------------------------------------------------------------
+
+Collection: users/{uid}
+  Fields:
+    uid           String    Firebase Auth UID
+    name          String    Display name
+    email         String    User email
+    role          String    "student" | "cashier" | "server" | "admin"
+    fcmToken      String    Primary FCM device token
+    createdAt     Timestamp
+  Sub-collection: users/{uid}/fcmTokens/{tokenId}
+    token         String    Additional device FCM tokens
+
+Collection: orders/{orderId}
+  Fields:
+    orderId             String    Format: "order_{timestamp}_{random}"
+    userId              String    Auth UID or "guest_{timestamp}"
+    userName            String
+    items               Array     [{id, name, price, costPrice, category,
+                                   imageUrl, quantity, servedQty, remainingQty}]
+    totalAmount         Number
+    paymentType         String    "CASH" | "UPI" | "CARD" | "NET"
+    paymentStatus       String    "PENDING" | "SUCCESS" | "REJECTED"
+    orderStatus         String    "PENDING" | "ACTIVE" | "COMPLETED" | "CANCELLED"
+    qrStatus            String    "PENDING_PAYMENT" | "ACTIVE" | "USED" | "REJECTED"
+    qrState             String    "ACTIVE" | "SCANNED" | "SERVED"
+    qr                  Object    {token, status, createdAt}
+    qrExpiresAt         Timestamp QR expiry (30 min from creation)
+    kitchenStatus       String    "PLACED" | "COOKING" | "READY" | "SERVED"
+    orderType           String    "FAST_ITEM" | "PREPARATION_ITEM"
+    serveFlowStatus     String    "NEW" | "QUEUED" | "PREPARING" | "READY" | "PAID" | "SERVED"
+    preparationStationId  String  Station handling this order
+    cafeteriaId         String    e.g. "MAIN_CAFE"
+    createdAt           Timestamp
+    scannedAt           Timestamp
+    servedAt            Timestamp
+    confirmedBy         String    UID of cashier who confirmed
+    confirmedAt         Timestamp
+    rejectedBy          String
+    rejectedAt          Timestamp
+    estimatedReadyTime  Timestamp
+    pickupWindowStart   Timestamp
+    pickupWindowEnd     Timestamp
+    queuePosition       Number    Position in preparation queue
+    sentPickupReminderAt Timestamp
+
+Collection: menu/{itemId}
+  Fields:
+    id            String
+    name          String
+    price         Number    (INR)
+    costPrice     Number    (for profit reporting)
+    category      String    "Breakfast" | "Lunch" | "Snacks" | "Beverages" etc.
+    imageUrl      String
+    available     Boolean
+    description   String
+
+Collection: inventory/{itemId}
+  Fields:
+    itemId        String
+    itemName      String
+    openingStock  Number
+    consumed      Number    (server-updated via serveItem function)
+    category      String
+    lastUpdated   Timestamp
+
+Collection: inventory_meta/{itemId}             (real-time stock for students)
+  Fields:
+    itemId            String
+    itemName          String
+    totalStock        Number
+    consumed          Number
+    available         Number    (computed: totalStock - consumed)
+    stockStatus       String    "AVAILABLE" | "LOW_STOCK" | "OUT_OF_STOCK"
+    lowStockThreshold Number    Default: 20
+    category          String
+    lastUpdated       Timestamp
+
+Collection: inventory_shards/{itemId}/shards/{shardId}
+  Fields:
+    count         Number    Distributed write counter (10 shards default)
+    lastUpdated   Timestamp
+
+Collection: settings/global
+  Fields:
+    orderingEnabled       Boolean   Kill-switch for all new orders
+    acceptingOrders       Boolean
+    isMaintenanceMode     Boolean
+    announcement          String    Banner shown in student app
+    taxRate               Number
+    minOrderValue         Number
+    servingRatePerMin     Number    For queue wait time estimate
+    peakHourThreshold     Number
+    autoSettlementEnabled Boolean
+
+Collection: scanLogs/{logId}
+  Fields:
+    orderId       String
+    userId        String
+    userName      String
+    scannedBy     String    UID of server staff
+    scanTime      Timestamp
+    scanResult    String
+    totalAmount   Number
+
+Collection: serveLogs/{logId}
+  Fields:
+    orderId         String
+    itemId          String
+    itemName        String
+    quantityServed  Number
+    servedBy        String
+    servedAt        Timestamp
+
+Collection: dailyReports/{reportId}
+  Fields:
+    date          String    "YYYY-MM-DD"
+    totalOrders   Number
+    totalRevenue  Number
+    totalItems    Number
+    byCategory    Object
+    generatedAt   Timestamp
+
+Collection: fraudLogs/{logId}
+  Fields:
+    orderId    String
+    userId     String
+    reason     String    "expired_qr" | "duplicate_scan" | "high_order_rate"
+    details    Object
+    createdAt  Timestamp
+
+Collection: flags/{orderId}
+  Fields:
+    orderId    String
+    userId     String
+    reason     String
+    count      Number
+    createdAt  Timestamp
+
+Collection: notificationLogs/{logId}
+  Fields:
+    orderId       String
+    userId        String
+    type          String    "ORDER_READY" | "PICKUP_REMINDER"
+    sentAt        Timestamp
+    success       Boolean
+    successCount  Number
+    totalTokens   Number
+
+Collection: preparationStations/{stationId}
+  Fields:
+    maxConcurrentPreparation  Number    Default: 3
+    avgPrepTimeSeconds        Number    Default: 45
+
+Collection: carts/{userId}
+  Fields:
+    items         Array
+    updatedAt     Timestamp
+
+--------------------------------------------------------------------------------
+5. FIRESTORE SECURITY RULES  (firestore.rules)
+--------------------------------------------------------------------------------
+
+COLLECTION          READ                        WRITE
+---------------------------------------------------------------------------
+users/{uid}         auth user (own) or admin    auth user (own) or admin
+users/.../fcmTokens auth user (own)             auth user (own)
+menu/{itemId}       public (anyone)             admin only
+orders/{orderId}    public (anyone)             CREATE: auth users + guests*
+                                                UPDATE: cashier or admin
+                                                DELETE: admin only
+inventory/{itemId}  admin, server, cashier      BLOCKED (Functions only)
+inventory_meta      public (anyone)             BLOCKED (Functions only)
+inventory_shards    admin, server, cashier      BLOCKED (Functions only)
+settings/global     public (anyone)             admin only
+scanLogs            admin, server, cashier      BLOCKED (Functions only)
+serveLogs           admin, server, cashier      BLOCKED (Functions only)
+dailyReports        admin, cashier              admin only
+carts/{userId}      auth user (own)             auth user (own)
+flags               admin only                  BLOCKED (Functions only)
+fraudLogs           admin only                  BLOCKED (Functions only)
+notificationLogs    admin only                  BLOCKED (Functions only)
+preparationStations admin, server               admin only
+
+* Guest order creation: userId must match pattern "guest_.*"
+
+--------------------------------------------------------------------------------
+6. CLOUD FUNCTIONS  (functions/index.js — 907 lines)
+--------------------------------------------------------------------------------
+
+NOTE: All functions are CODED and READY. They require Firebase Blaze plan
+to deploy. When VITE_USE_CALLABLES=false, the frontend uses direct Firestore
+writes instead. Flip to true after upgrading to Blaze.
+
+Runtime Config:
+  - firebase-functions v4.5.0
+  - firebase-admin     v11.11.0
+  - Node.js            18
+  - Region             us-central1
+
+--- HTTP CALLABLE FUNCTIONS (onCall) ---
+
+1. createOrder
+   Timeout: 30s | Memory: 512MB | maxInstances: 20
+   Accepts: {userId, userName, items[], totalAmount, paymentType,
+             paymentStatus, cafeteriaId}
+   Guards:
+     - Ordering kill-switch check (settings.orderingEnabled)
+     - Max 25 different items per order
+     - Max 10 quantity per item
+     - Real-time stock check via inventory_meta
+     - Rate limit: 5 seconds between orders per user
+     - Max 3 active orders per user simultaneously
+   Returns: { orderId }
+
+2. confirmPayment  (cashier/admin only)
+   Timeout: 20s | Memory: 256MB
+   Accepts: { orderId }
+   Actions:
+     - Verifies cashier/admin role
+     - Runs Firestore transaction (idempotent)
+     - Generates HMAC-SHA256 signed QR token
+     - Sets paymentStatus=SUCCESS, qrStatus=ACTIVE
+     - Sets 30-min QR expiry timestamp
+   Returns: { success, orderId }
+
+3. rejectPayment  (cashier/admin only)
+   Timeout: 15s | Memory: 256MB
+   Accepts: { orderId }
+   Actions:
+     - Verifies cashier/admin role
+     - Sets paymentStatus=REJECTED, orderStatus=CANCELLED
+     - Sets qrStatus=REJECTED
+   Returns: { success, orderId }
+
+4. validateQRCode  (server staff only)
+   Timeout: 20s | Memory: 256MB
+   Accepts: { qrPayload: string }
+   Actions:
+     - Parses JSON QR token
+     - Verifies HMAC-SHA256 signature
+     - Checks QR expiry (30 min window)
+     - Checks for duplicate scans (fraud detection)
+     - Verifies paymentStatus=SUCCESS
+     - For PREPARATION_ITEM: checks serveFlowStatus=READY
+     - Atomically sets qrStatus=USED, qrState=SCANNED, orderStatus=ACTIVE
+     - Writes to scanLogs
+   Returns: { success, order: { id, userId, userName, items, totalAmount } }
+
+5. serveItem  (server/admin only)
+   Timeout: 20s | Memory: 512MB | maxInstances: 50
+   Accepts: { orderId, itemId, servedBy }
+   Actions:
+     - Runs Firestore transaction
+     - Validates stock: reads inventory_meta.totalStock + sum(shards)
+     - Decrements stock via random shard (avoids hotspot writes)
+     - Updates item servedQty and remainingQty on order
+     - Sets orderStatus=COMPLETED when all items served
+     - Writes serve log
+   Returns: { success }
+
+6. updateInventory  (admin only)
+   Timeout: 15s | Memory: 256MB
+   Accepts: { itemId, itemName, openingStock, consumed, category,
+              lowStockThreshold }
+   Actions:
+     - Upserts inventory doc
+     - Syncs inventory_meta (totalStock, available, stockStatus)
+   Returns: { success }
+
+7. cancelOrder  (order owner, cashier, or admin)
+   Timeout: 15s | Memory: 256MB
+   Accepts: { orderId }
+   Actions:
+     - Role check: owner OR cashier/admin
+     - Cannot cancel COMPLETED or already SUCCESS orders
+     - Sets orderStatus=CANCELLED, qrStatus=REJECTED
+   Returns: { success }
+
+8. updateKitchenStatus  (server/admin only)
+   Timeout: 15s | Memory: 256MB
+   Accepts: { orderId, kitchenStatus }
+   Valid values: PLACED | COOKING | READY | SERVED
+   Returns: { success }
+
+9. updateServeFlowStatus  (server/admin only)
+   Timeout: 25s | Memory: 256MB
+   Accepts: { orderId, serveFlowStatus }
+   Valid values: PREPARING | READY
+   Actions for PREPARING:
+     - Checks station slot availability (maxConcurrentPreparation)
+     - If slot free: sets status=PREPARING + calculates pickup window
+     - If station full: queues order (status=QUEUED) with estimated start time
+   Actions for READY:
+     - Sets serveFlowStatus=READY
+     - Sends FCM push notification to customer (ORDER_READY)
+     - Calls advanceQueue() to auto-promote next QUEUED order to PREPARING
+   Returns: { success, estimatedReadyTime?, pickupWindowEnd? }
+
+--- FIRESTORE TRIGGER FUNCTIONS ---
+
+10. onInventoryShardWritten
+    Trigger: inventory_shards/{itemId}/shards/{shardId} onWrite
+    Actions:
+      - Aggregates all shard counts → total consumed
+      - Updates inventory_meta: consumed, available, stockStatus
+      - Throttled: skips re-aggregation if updated within 3 seconds
+    Purpose: Real-time stock visibility for students
+
+11. onOrderCreated
+    Trigger: orders/{orderId} onCreate
+    Actions:
+      - Skips guest users (guest_*)
+      - Checks if user placed more than 10 orders in past hour
+      - If yes: writes fraud flag to flags/{orderId}
+    Purpose: Automated fraud detection
+
+--- SCHEDULED FUNCTIONS ---
+
+12. scheduledPickupReminder
+    Schedule: Every 2 minutes (Asia/Kolkata timezone)
+    Actions:
+      - Finds PREPARATION_ITEM orders where serveFlowStatus=READY
+        and pickup window starts within next 3 minutes
+      - Sends FCM push notification ("Pickup soon")
+      - Marks order with sentPickupReminderAt to avoid duplicate sends
+    Purpose: Notify students when their food is ready for pickup
+
+--------------------------------------------------------------------------------
+7. FRONTEND SERVICE LAYER
+--------------------------------------------------------------------------------
+
+File: services/firestore-db.ts  (1589 lines)
+  - Dual-mode: Cloud Functions callable OR direct Firestore writes
+  - Toggle: useCallables() checks VITE_USE_CALLABLES env var
+  - All functions have fallback implementations for free mode
+
+File: services/callables.ts  (73 lines)
+  - Firebase SDK httpsCallable wrappers for all 9 Cloud Functions
+  - Auto-connects to Functions emulator in dev if VITE_USE_FUNCTIONS_EMULATOR=true
+  - Correct return type generics (fixed type bug — no double data nesting)
+
+File: services/qr.ts
+  - Client-side HMAC-SHA256 QR token generation
+  - QR verification for direct Firestore mode
+  - Shared secret: JOE_QR_SECRET_2024_SECURE_TOKEN_KEY_PRODUCTION
+  - QR expiry: 30 minutes from creation
+
+File: services/fcm.ts
+  - FCM token registration and management
+  - Requires VITE_FIREBASE_VAPID_KEY to be set
+
+File: firebase.ts
+  - Firebase app initialization (prevents duplicate init)
+  - Firestore with persistentLocalCache (offline support)
+  - Auth initialized
+
+--------------------------------------------------------------------------------
+8. PAYMENT FLOW — COMPLETE WALKTHROUGH
+--------------------------------------------------------------------------------
+
+[UPI / CARD / NET BANKING]
+  1. Student selects items → PaymentView.tsx
+  2. Taps "Pay ₹{total} Now"
+  3. createOrder() called with paymentStatus="SUCCESS"
+  4. Order written to Firestore: qrStatus="ACTIVE"
+  5. QR code generated immediately (HMAC-SHA256 signed)
+  6. Student shown QR code view
+  7. Server scans QR → validateQRCode() verifies + marks order ACTIVE
+  8. Server taps each item as served → serveItem()
+  9. All items served → orderStatus="COMPLETED"
+
+[CASH (Pay at Counter)]
+  1. Student selects items → PaymentView.tsx
+  2. Taps "Confirm Order"
+  3. createOrder() called with paymentStatus="PENDING", qrStatus="PENDING_PAYMENT"
+  4. Order written to Firestore
+  5. Student sees "Go to Cashier" waiting screen
+  6. Real-time listener (listenToOrder) polls order for status change
+  7. Cashier opens Cashier Dashboard → sees pending cash order
+  8. Cashier taps "Confirm" → confirmPayment() / confirmCashPayment()
+     → paymentStatus="SUCCESS", qrStatus="ACTIVE", QR token generated
+  9. Student screen automatically redirects to QR view (real-time listener fired)
+  10. Server scans QR → validates → serves items
+
+[CASH REJECTION]
+  - Cashier taps "Reject" → rejectPayment()
+  - paymentStatus="REJECTED", orderStatus="CANCELLED"
+  - Student sees "Payment Rejected" screen with auto-redirect after 3s
+
+--------------------------------------------------------------------------------
+9. PREPARATION ORDER FLOW (DOSA / COOKED ITEMS)
+--------------------------------------------------------------------------------
+
+Order Types:
+  - FAST_ITEM        : Pre-plated lunch items, served immediately after QR scan
+  - PREPARATION_ITEM : Fresh-cooked items (Dosa, Uttapam etc.), queue-managed
+
+Serve Flow Status Machine:
+  NEW → (staff marks PREPARING) → QUEUED (if station full) → PREPARING →
+  READY (FCM sent to student) → SERVED (after QR scan + serveItem)
+
+Queue Management:
+  - Each station has maxConcurrentPreparation (default: 3 orders cooking at once)
+  - If station full: order goes to QUEUED with estimated start time
+  - When a PREPARING order becomes READY: advanceQueue() auto-promotes next QUEUED order
+  - Student pickup window: estimated ready time + 2 minutes
+
+Prep Time by Item (seconds):
+  Dosa (id:3,4): 30-45s | Uttapam (id:10): 60s | Default: 45s
+
+--------------------------------------------------------------------------------
+10. REAL-TIME FEATURES
+--------------------------------------------------------------------------------
+
+All real-time updates use Firestore onSnapshot() listeners:
+
+Feature                         Listener Function
+-------------------------------------------------------------------
+Order status for student        listenToOrder(orderId, cb)
+Cash orders for cashier         listenToPendingCashOrders(cb)
+All orders for admin            listenToRecentOrders(cb)
+Active orders for server        listenToActiveOrders(cb)
+Preparation orders              listenToPreparationOrders(cb)
+Inventory stock for students    listenToInventoryMeta(cb)
+System settings/announcements   listenToSettings(cb)
+User-specific orders            listenToUserOrders(userId, cb)
+Latest active QR                listenToLatestActiveQR(userId, cb)
+
+Push Notifications (FCM):
+  - ORDER_READY    : Sent when server marks order READY
+  - PICKUP_REMINDER: Sent 2 min before pickup window (scheduled function)
+
+--------------------------------------------------------------------------------
+11. ROLE SYSTEM
+--------------------------------------------------------------------------------
+
+Role         Permissions
+---------------------------------------------------------------------------
+student      Place orders, view own orders, view menu, view QR code
+cashier      Confirm/reject cash payments, view all pending cash orders
+server       Scan QR codes, serve items, update kitchen/serve flow status
+admin        All of the above + manage menu, inventory, settings, users,
+             view reports, cancel any order
+
+Role stored in: users/{uid}.role (Firestore)
+Enforced by:
+  - Firestore Security Rules (client-side operations)
+  - Cloud Functions requireRole() helper (server-side operations)
+
+--------------------------------------------------------------------------------
+12. INVENTORY SYSTEM
+--------------------------------------------------------------------------------
+
+Architecture: Distributed shard counters to handle high write throughput
+  - inventory/{itemId}         : Base stock (admin set, openingStock)
+  - inventory_shards/{id}/shards/{0-9}: 10 shards, each tracks servedQty
+  - inventory_meta/{itemId}    : Aggregated view for real-time student display
+
+Stock Calculation:
+  available = totalStock - SUM(all shards[i].count)
+
+Stock Status Thresholds:
+  available <= 0               → OUT_OF_STOCK
+  available <= lowStockThreshold (default 20) → LOW_STOCK
+  available >  lowStockThreshold → AVAILABLE
+
+Update Flow:
+  serveItem() → increments random shard →
+  onInventoryShardWritten() trigger → re-aggregates → updates inventory_meta →
+  Student app sees updated stock via listenToInventoryMeta()
+
+--------------------------------------------------------------------------------
+13. QR CODE SECURITY
+--------------------------------------------------------------------------------
+
+Algorithm:    HMAC-SHA256
+Encoding:     Base64URL (URL-safe: +→-, /→_, padding stripped)
+Expiry:       30 minutes from payment confirmation
+Secret Key:   JOE_QR_SECRET_2024_SECURE_TOKEN_KEY_PRODUCTION
+              (set via process.env.QR_SECRET_KEY in Cloud Functions)
+
+QR Token Payload (JSON):
+  {
+    orderId    : string,
+    userId     : string,
+    cafeteriaId: string,
+    secureHash : string,   (HMAC over "orderId|userId|cafeteriaId|createdAt|expiresAt")
+    expiresAt  : number,   (Unix ms)
+    createdAt  : number    (Unix ms)
+  }
+
+Fraud Protections:
+  - Signature verification (tamper-proof)
+  - Expiry check (30-min window)
+  - Duplicate scan detection (qrState=SCANNED check)
+  - Expired/duplicate scans logged to fraudLogs
+  - High order rate detection (>10 orders/hour) logged to flags
+
+--------------------------------------------------------------------------------
+14. FILES CHANGED IN THIS SESSION (2026-03-15)
+--------------------------------------------------------------------------------
+
+FILE                           CHANGE
+------------------------------------------------------------------------
+.env                           CREATED — All Firebase config + flags
+services/callables.ts          FIXED — Return type generics corrected
+                               (removed double { data: {} } nesting)
+functions/index.ts             CLEANED — Clarified stub comment
+firestore.rules                UPDATED — Orders: allow guest+auth create,
+                               allow cashier update (v1 free mode)
+
+Firestore Rules Deployed:      YES (firebase deploy --only firestore:rules)
+Cloud Functions Deployed:      NO  (requires Blaze plan — pending upgrade)
+Build Status:                  PASSING (npm run build — 0 errors)
+
+--------------------------------------------------------------------------------
+15. UPGRADE CHECKLIST (When Moving to Blaze Plan)
+--------------------------------------------------------------------------------
+
+[ ] Enable GCP billing at: https://console.cloud.google.com/billing?project=joecafe-a7fff
+[ ] Verify APIs are enabled:
+    - cloudfunctions.googleapis.com
+    - cloudbuild.googleapis.com
+    - artifactregistry.googleapis.com
+[ ] Install functions dependencies: cd functions && npm install
+[ ] Deploy all Cloud Functions: firebase deploy --only functions
+[ ] Update .env: VITE_USE_CALLABLES=true
+[ ] Revert firestore.rules orders section: allow create: if false
+[ ] Set QR_SECRET_KEY env in Cloud Functions:
+    firebase functions:secrets:set QR_SECRET_KEY
+[ ] Set VITE_FIREBASE_VAPID_KEY from Firebase Console (for FCM push)
+[ ] Deploy updated rules: firebase deploy --only firestore:rules
+[ ] Test full payment flow end-to-end
+[ ] Monitor logs: firebase functions:log --project joecafe-a7fff
+
+--------------------------------------------------------------------------------
+16. USEFUL COMMANDS
+--------------------------------------------------------------------------------
+
+# Start dev server
+npm run dev
+
+# Build for production
+npm run build
+
+# Deploy Firestore rules only (free)
+firebase deploy --only firestore:rules --project joecafe-a7fff
+
+# Deploy Firestore indexes only (free)
+firebase deploy --only firestore:indexes --project joecafe-a7fff
+
+# Deploy Cloud Functions (Blaze plan required)
+firebase deploy --only functions --project joecafe-a7fff
+
+# Deploy single function
+firebase deploy --only functions:createOrder --project joecafe-a7fff
+
+# View function logs
+firebase functions:log --project joecafe-a7fff
+
+# Start local emulators (for testing functions locally)
+firebase emulators:start --only functions,firestore --project joecafe-a7fff
+
+# Re-authenticate Firebase CLI
+firebase login --reauth
+
+================================================================================
+  END OF SUMMARY
+  JOE Cafeteria Automation — Built with Firebase, React + Vite, TypeScript
+================================================================================

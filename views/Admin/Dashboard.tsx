@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { 
-  Users as UsersIcon, DollarSign, Menu as MenuIcon, Settings as SettingsIcon, LogOut, TrendingUp,
+  Users as UsersIcon, DollarSign, Menu as MenuIcon, Settings as SettingsIcon, LogOut, TrendingUp, ChefHat,
   Package, FileText, LayoutDashboard, Search, AlertCircle, 
   CheckCircle2, Activity, Trash2, Edit2, ShieldAlert,
   Bell, Globe, Gauge, ShieldCheck, Plus, X as CloseIcon, 
@@ -11,11 +11,12 @@ import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, 
   ResponsiveContainer, PieChart, Pie, Cell, Legend, AreaChart, Area
 } from 'recharts';
-import { UserProfile, Order, MenuItem, SystemSettings, InventoryItem } from '../../types';
+import { UserProfile, Order, MenuItem, SystemSettings, InventoryItem, InventoryMetaItem } from '../../types';
 import { 
   listenToAllOrders, listenToMenu, listenToAllUsers,
   updateUserRole, toggleUserStatus, addMenuItem, updateMenuItem, deleteMenuItem,
-  listenToSettings, updateSettings, listenToInventory, updateInventoryItem
+  listenToSettings, updateSettings, listenToInventory, listenToInventoryMeta, updateInventoryItem,
+  getDailyConsumptionByItem, getPopularMenuItems
 } from '../../services/firestore-db';
 import { CATEGORIES } from '../../constants';
 import Logo from '../../components/Logo';
@@ -28,19 +29,23 @@ const COLORS = ['#0F9D58', '#34D399', '#FBBF24', '#6B7280', '#EF4444'];
 interface AdminDashboardProps {
   profile: UserProfile;
   onLogout: () => void;
+  onOpenKitchen?: () => void;
 }
 
 type AdminTab = 'Overview' | 'Team' | 'Menu' | 'Inventory' | 'Settings' | 'Reports';
 
-const AdminDashboard: React.FC<AdminDashboardProps> = ({ profile, onLogout }) => {
+const AdminDashboard: React.FC<AdminDashboardProps> = ({ profile, onLogout, onOpenKitchen }) => {
   const [activeTab, setActiveTab] = useState<AdminTab>('Overview');
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [orders, setOrders] = useState<Order[]>([]);
   const [menuItems, setMenuItems] = useState<MenuItem[]>([]);
   const [users, setUsers] = useState<UserProfile[]>([]);
   const [inventory, setInventory] = useState<InventoryItem[]>([]);
+  const [inventoryMeta, setInventoryMeta] = useState<InventoryMetaItem[]>([]);
   const [settings, setSettings] = useState<SystemSettings | null>(null);
   const [inventorySearch, setInventorySearch] = useState('');
+  const [dailyConsumption, setDailyConsumption] = useState<Record<string, number>>({});
+  const [popularItems, setPopularItems] = useState<{ itemId: string; itemName?: string; quantity: number }[]>([]);
   const [reportStart, setReportStart] = useState<string>(() => new Date().toISOString().split('T')[0]);
   const [reportEnd, setReportEnd] = useState<string>(() => new Date().toISOString().split('T')[0]);
   const [reportLoading, setReportLoading] = useState(false);
@@ -80,9 +85,23 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ profile, onLogout }) =>
       listenToInventory((data) => {
         setInventory(data);
         offlineDetector.recordPing();
+      }),
+      listenToInventoryMeta((data) => {
+        setInventoryMeta(data);
+        offlineDetector.recordPing();
       })
     ];
     return () => unsubs.forEach(fn => fn());
+  }, []);
+
+  useEffect(() => {
+    getDailyConsumptionByItem().then(setDailyConsumption).catch(() => setDailyConsumption({}));
+    getPopularMenuItems().then(setPopularItems).catch(() => setPopularItems([]));
+    const t = setInterval(() => {
+      getDailyConsumptionByItem().then(setDailyConsumption).catch(() => {});
+      getPopularMenuItems().then(setPopularItems).catch(() => {});
+    }, 60000);
+    return () => clearInterval(t);
   }, []);
 
   useEffect(() => {
@@ -223,12 +242,26 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ profile, onLogout }) =>
     }
   };
 
+  // Merge inventory + inventory_meta: prefer meta for totalStock/consumed (real-time from shards)
+  const mergedInventory = useMemo((): InventoryItem[] => {
+    const metaByItem: Record<string, InventoryMetaItem> = {};
+    inventoryMeta.forEach((m) => { metaByItem[m.itemId] = m; });
+    return inventory.map((inv) => {
+      const meta = metaByItem[inv.itemId];
+      return {
+        ...inv,
+        openingStock: meta ? meta.totalStock : inv.openingStock,
+        consumed: meta ? meta.consumed : inv.consumed,
+      };
+    });
+  }, [inventory, inventoryMeta]);
+
   const filteredInventory = useMemo(() => {
-    return inventory.filter(i => 
+    return mergedInventory.filter(i => 
       i.itemName.toLowerCase().includes(inventorySearch.toLowerCase()) || 
       i.category.toLowerCase().includes(inventorySearch.toLowerCase())
     );
-  }, [inventory, inventorySearch]);
+  }, [mergedInventory, inventorySearch]);
 
   const navItems = [
     { id: 'Overview', icon: LayoutDashboard },
@@ -269,6 +302,15 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ profile, onLogout }) =>
             {item.id}
           </button>
         ))}
+        {onOpenKitchen && (
+          <button
+            onClick={() => { onOpenKitchen(); setIsSidebarOpen(false); }}
+            className="w-full flex items-center gap-4 px-6 py-4 rounded-[1.25rem] transition-all font-black text-xs uppercase tracking-widest text-amber-600 hover:bg-amber-50"
+          >
+            <ChefHat className="w-5 h-5" />
+            Kitchen
+          </button>
+        )}
       </nav>
       <div className="p-8 border-t bg-gray-50/50">
         <div className="flex items-center gap-3 mb-6 p-4 bg-white rounded-2xl border border-black/5 shadow-sm">
@@ -677,10 +719,10 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ profile, onLogout }) =>
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
         {[
-          { label: 'Out of Stock', value: inventory.filter(i => (i.openingStock - i.consumed) <= 0).length, icon: AlertCircle, color: 'text-error bg-error/10' },
-          { label: 'Low Stock', value: inventory.filter(i => (i.openingStock - i.consumed) > 0 && (i.openingStock - i.consumed) < 20).length, icon: AlertTriangle, color: 'text-cash bg-cash/10' },
-          { label: 'High Demand', value: [...inventory].sort((a,b) => b.consumed - a.consumed)[0]?.itemName || 'N/A', icon: TrendingUp, color: 'text-primary bg-primary/10' },
-          { label: 'Total Stocked', value: inventory.length, icon: Package, color: 'text-blue-500 bg-blue-50' },
+          { label: 'Out of Stock', value: mergedInventory.filter(i => (i.openingStock - i.consumed) <= 0).length, icon: AlertCircle, color: 'text-error bg-error/10' },
+          { label: 'Low Stock', value: mergedInventory.filter(i => { const r = i.openingStock - i.consumed; return r > 0 && r < 20; }).length, icon: AlertTriangle, color: 'text-cash bg-cash/10' },
+          { label: 'High Demand', value: [...mergedInventory].sort((a,b) => b.consumed - a.consumed)[0]?.itemName || popularItems[0]?.itemName || 'N/A', icon: TrendingUp, color: 'text-primary bg-primary/10' },
+          { label: 'Total Stocked', value: mergedInventory.length, icon: Package, color: 'text-blue-500 bg-blue-50' },
         ].map((s, i) => (
           <div key={i} className="bg-white p-6 rounded-[2rem] border border-black/5 shadow-sm flex items-center gap-4">
             <div className={`p-4 rounded-2xl ${s.color}`}><s.icon className="w-5 h-5" /></div>
@@ -690,6 +732,42 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ profile, onLogout }) =>
             </div>
           </div>
         ))}
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+        <div className="bg-white p-6 rounded-[2rem] border border-black/5 shadow-sm">
+          <h4 className="text-[10px] font-black text-textSecondary uppercase tracking-widest mb-4">Today&apos;s consumption (served)</h4>
+          <ul className="space-y-2">
+            {Object.entries(dailyConsumption)
+              .sort((a, b) => b[1] - a[1])
+              .slice(0, 8)
+              .map(([itemId, qty]) => (
+                <li key={itemId} className="flex justify-between text-sm">
+                  <span className="font-bold text-textMain truncate max-w-[180px]">
+                    {mergedInventory.find(i => i.itemId === itemId)?.itemName || itemId}
+                  </span>
+                  <span className="font-black text-primary">{qty}</span>
+                </li>
+              ))}
+            {Object.keys(dailyConsumption).length === 0 && (
+              <li className="text-textSecondary text-sm">No serves today yet</li>
+            )}
+          </ul>
+        </div>
+        <div className="bg-white p-6 rounded-[2rem] border border-black/5 shadow-sm">
+          <h4 className="text-[10px] font-black text-textSecondary uppercase tracking-widest mb-4">Popular items (recent orders)</h4>
+          <ul className="space-y-2">
+            {popularItems.slice(0, 8).map((p) => (
+              <li key={p.itemId} className="flex justify-between text-sm">
+                <span className="font-bold text-textMain truncate max-w-[180px]">{p.itemName || p.itemId}</span>
+                <span className="font-black text-primary">{p.quantity} ordered</span>
+              </li>
+            ))}
+            {popularItems.length === 0 && (
+              <li className="text-textSecondary text-sm">No order data</li>
+            )}
+          </ul>
+        </div>
       </div>
 
       <div className="bg-white rounded-[2.5rem] border border-black/5 shadow-sm overflow-hidden">
@@ -886,6 +964,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ profile, onLogout }) =>
           {[
             { id: 'isMaintenanceMode', label: 'Lockdown', desc: 'Read-only access', icon: ShieldAlert, color: 'text-error' },
             { id: 'acceptingOrders', label: 'Order Flow', desc: 'Accepting carts', icon: Zap, color: 'text-primary' },
+            { id: 'orderingEnabled', label: 'Ordering', desc: 'Allow new orders (fail-safe)', icon: Zap, color: 'text-amber-600' },
             { id: 'autoSettlementEnabled', label: 'Settlement', desc: 'Auto daily reset', icon: CalendarDays, color: 'text-accent' }
           ].map(item => (
             <div key={item.id} className={`p-8 bg-gray-50 rounded-[2.5rem] flex flex-col justify-between min-h-[160px] border transition-all ${

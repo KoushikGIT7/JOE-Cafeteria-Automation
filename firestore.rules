@@ -1,135 +1,155 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    
-    // Helper function to check if user is authenticated
+
     function isAuthenticated() {
       return request.auth != null;
     }
-    
-    // Helper function to get user role
+
     function getUserRole() {
       return get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role;
     }
-    
-    // Helper function to check if user has specific role
+
     function hasRole(role) {
       return isAuthenticated() && getUserRole() == role;
     }
-    
-    // Helper function to check if user is admin or has specific role
+
     function isAdminOrRole(role) {
       return isAuthenticated() && (getUserRole() == 'admin' || getUserRole() == role);
     }
-    
-    
+
     // ========================================================================
-    // USERS COLLECTION
+    // USERS
     // ========================================================================
     match /users/{userId} {
-      // Users can read their own profile
       allow read: if isAuthenticated() && (request.auth.uid == userId || hasRole('admin'));
-      
-      // Only admins can create/update user profiles (except own profile creation during signup)
       allow create: if isAuthenticated() && (request.auth.uid == userId || hasRole('admin'));
       allow update: if isAuthenticated() && (request.auth.uid == userId || hasRole('admin'));
-      
-      // Only admins can delete users
       allow delete: if hasRole('admin');
     }
-    
+    match /users/{userId}/fcmTokens/{tokenId} {
+      allow read, write: if isAuthenticated() && request.auth.uid == userId;
+    }
+
     // ========================================================================
-    // MENU COLLECTION
+    // MENU
     // ========================================================================
     match /menu/{itemId} {
-      // Everyone can read active menu items
       allow read: if true;
-      
-      // Only admins can create/update/delete menu items
       allow write: if hasRole('admin');
     }
-    
+
     // ========================================================================
-    // ORDERS COLLECTION
+    // ORDERS
+    // v1 FREE MODE: Clients write orders directly (no Cloud Functions needed).
+    // When upgrading to Blaze + Cloud Functions, set: allow create: if false;
     // ========================================================================
     match /orders/{orderId} {
-      // Anyone can read orders (authenticated users read their own + staff read all, unauthenticated guests read their created orders)
-      // This is safe because orders are session-based and don't contain sensitive payment info
+      // Anyone can read orders (students track their own, staff see all)
       allow read: if true;
-      
-      // Anyone (authenticated or guest) can create orders
-      // Guests have userId like "guest_1234567890"
-      allow create: if true;
-      
-      // Cashiers can update payment status, servers can update serving status
-      allow update: if isAuthenticated() && (
-        hasRole('admin') ||
-        (hasRole('cashier') && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['paymentStatus', 'qrStatus', 'confirmedBy', 'confirmedAt', 'qr', 'orderStatus', 'rejectedAt', 'rejectedBy'])) ||
-        (hasRole('server') && request.resource.data.diff(resource.data).affectedKeys().hasAny(['orderStatus', 'scannedAt', 'servedAt', 'items']))
+
+      // Allow order creation:
+      // - Authenticated users can create their own orders
+      // - Guest users (userId starts with "guest_") can create orders
+      allow create: if (
+        isAuthenticated() && request.resource.data.userId == request.auth.uid
+      ) || (
+        request.resource.data.userId is string &&
+        request.resource.data.userId.matches("guest_.*")
       );
-      
-      // Only admins can delete orders
+
+      // Allow cashier/admin to update orders (confirm/reject cash payments)
+      allow update: if isAdminOrRole('cashier');
+
       allow delete: if hasRole('admin');
     }
-    
+
     // ========================================================================
-    // INVENTORY COLLECTION
+    // INVENTORY — Read-only from client; write only via Cloud Functions
+    // Students/guests can read inventory_meta for real-time stock visibility
     // ========================================================================
     match /inventory/{itemId} {
-      // Staff and admins can read inventory
       allow read: if isAuthenticated() && (hasRole('admin') || hasRole('server') || hasRole('cashier'));
-      
-      // Only admins and servers can update inventory
-      allow write: if isAuthenticated() && (hasRole('admin') || hasRole('server'));
+      allow write: if false;
     }
-    
+
+    // Real-time stock for students/guests: read inventory_meta (totalStock, consumed, available, stockStatus)
+    match /inventory_meta/{itemId} {
+      // Allow public read access (including guest/unauthenticated) for non-sensitive aggregate stock data
+      allow read: if true;
+      allow write: if false;
+    }
+    match /inventory_shards/{itemId}/shards/{shardId} {
+      allow read: if isAuthenticated() && (hasRole('admin') || hasRole('server') || hasRole('cashier'));
+      allow write: if false;
+    }
+
     // ========================================================================
-    // SETTINGS COLLECTION
+    // SETTINGS
     // ========================================================================
     match /settings/{settingId} {
-      // Everyone can read settings
       allow read: if true;
-      
-      // Only admins can update settings
       allow write: if hasRole('admin');
     }
-    
+
     // ========================================================================
-    // SCAN LOGS COLLECTION
+    // SCAN LOGS — Create only via Cloud Functions
     // ========================================================================
     match /scanLogs/{logId} {
-      // Staff and admins can read scan logs
       allow read: if isAuthenticated() && (hasRole('admin') || hasRole('server') || hasRole('cashier'));
-      
-      // Servers can create scan logs (write-once)
-      allow create: if isAuthenticated() && (hasRole('admin') || hasRole('server'));
-      
-      // Only admins can update/delete logs
+      allow create: if false;
       allow update, delete: if hasRole('admin');
     }
-    
+
     // ========================================================================
-    // SERVE LOGS COLLECTION
+    // SERVE LOGS — Create only via Cloud Functions
     // ========================================================================
     match /serveLogs/{logId} {
-      // Staff and admins can read serve logs
       allow read: if isAuthenticated() && (hasRole('admin') || hasRole('server') || hasRole('cashier'));
-      
-      // Servers can create serve logs (write-once)
-      allow create: if isAuthenticated() && (hasRole('admin') || hasRole('server'));
-      
-      // Only admins can update/delete logs
+      allow create: if false;
       allow update, delete: if hasRole('admin');
     }
-    
+
     // ========================================================================
-    // DAILY REPORTS COLLECTION
+    // DAILY REPORTS
     // ========================================================================
     match /dailyReports/{reportId} {
-      // Admins and cashiers can read reports
-      allow read: if isAuthenticated() && (hasRole('admin') || hasRole('cashier'));
-      
-      // Only admins can create/update reports
+      allow read: if isAuthenticated() && isAdminOrRole('cashier');
+      allow write: if hasRole('admin');
+    }
+
+    // ========================================================================
+    // CARTS — Client can write own cart
+    // ========================================================================
+    match /carts/{userId} {
+      allow read, write: if isAuthenticated() && request.auth.uid == userId;
+    }
+
+    // ========================================================================
+    // FRAUD FLAGS — Written by Cloud Functions; read admin only
+    // ========================================================================
+    match /flags/{flagId} {
+      allow read: if isAuthenticated() && hasRole('admin');
+      allow write: if false;
+    }
+
+    // ========================================================================
+    // FRAUD LOGS — Failed/duplicate scans, expired QR (Functions only)
+    // ========================================================================
+    match /fraudLogs/{logId} {
+      allow read: if isAuthenticated() && hasRole('admin');
+      allow write: if false;
+    }
+
+    // Notification delivery logs (Cloud Functions only; admin analytics)
+    match /notificationLogs/{logId} {
+      allow read: if isAuthenticated() && hasRole('admin');
+      allow create, update, delete: if false;
+    }
+
+    // Smart kitchen: preparation station config (slot limits); read by server/admin, write by admin
+    match /preparationStations/{stationId} {
+      allow read: if isAuthenticated() && (hasRole('admin') || hasRole('server'));
       allow write: if hasRole('admin');
     }
   }

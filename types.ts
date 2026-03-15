@@ -20,6 +20,8 @@ export interface MenuItem {
   category: 'Breakfast' | 'Lunch' | 'Snacks' | 'Beverages';
   imageUrl: string;
   active: boolean;
+  /** Zero-wait: FAST_ITEM = instant serve; PREPARATION_ITEM = kitchen + pickup window. Default from category if absent. */
+  orderType?: OrderType;
 }
 
 export interface CartItem extends MenuItem {
@@ -31,6 +33,18 @@ export interface CartItem extends MenuItem {
 export type OrderStatus = 'PENDING' | 'PAID' | 'ACTIVE' | 'COMPLETED' | 'SERVED' | 'CANCELLED';
 export type QRStatus = 'ACTIVE' | 'USED' | 'EXPIRED' | 'PENDING_PAYMENT' | 'REJECTED';
 
+/** Zero-wait: FAST_ITEM = instant serve at counter; PREPARATION_ITEM = kitchen flow + pickup window */
+export type OrderType = 'FAST_ITEM' | 'PREPARATION_ITEM';
+
+/** Zero-wait serve flow: PAID | NEW → [QUEUED] → PREPARING → READY → SERVED. QUEUED = waiting for slot. */
+export type ServeFlowStatus = 'PAID' | 'NEW' | 'QUEUED' | 'PREPARING' | 'READY' | 'SERVED';
+
+/** QR lifecycle for fraud resistance: ACTIVE → SCANNED → SERVED (or EXPIRED) */
+export type QRState = 'ACTIVE' | 'SCANNED' | 'SERVED' | 'EXPIRED';
+
+/** Kitchen workflow: PLACED → COOKING → READY → SERVED */
+export type KitchenStatus = 'PLACED' | 'COOKING' | 'READY' | 'SERVED';
+
 export interface Order {
   id: string;
   userId: string;
@@ -41,6 +55,28 @@ export interface Order {
   paymentStatus: 'SUCCESS' | 'PENDING' | 'FAILED' | 'REJECTED';
   orderStatus: OrderStatus;
   qrStatus: QRStatus;
+  /** Zero-wait: FAST_ITEM (instant serve) vs PREPARATION_ITEM (kitchen + pickup window) */
+  orderType?: OrderType;
+  /** Serve flow: PAID | NEW | PREPARING | READY | SERVED */
+  serveFlowStatus?: ServeFlowStatus;
+  /** Pickup window (preparation items): milliseconds */
+  pickupWindowStart?: number;
+  pickupWindowEnd?: number;
+  estimatedReadyTime?: number;
+  /** Set when pickup-reminder FCM was sent (scheduled function) */
+  sentPickupReminderAt?: number;
+  /** Smart kitchen: preparation station (e.g. "dosa", "default") for slot control */
+  preparationStationId?: string;
+  /** Queue position when QUEUED (1-based); used for display and ordering */
+  queuePosition?: number;
+  /** When this order is expected to start preparing (QUEUED); ms */
+  estimatedQueueStartTime?: number;
+  /** Lifecycle state for QR (ACTIVE → SCANNED → SERVED) */
+  qrState?: QRState;
+  /** When QR was scanned (server) */
+  qrScannedAt?: number;
+  /** When QR expires (for validation) */
+  qrExpiresAt?: number;
   qr?: {
     token: string;
     status: 'ACTIVE' | 'USED';
@@ -49,6 +85,8 @@ export interface Order {
   createdAt: number;
   scannedAt?: number;
   servedAt?: number;
+  /** Kitchen workflow state */
+  kitchenStatus?: KitchenStatus;
   cafeteriaId: string;
   confirmedBy?: string;
   confirmedAt?: number;
@@ -66,11 +104,17 @@ export interface QRData {
 export interface SystemSettings {
   isMaintenanceMode: boolean;
   acceptingOrders: boolean;
+  /** Fail-safe: when false, students cannot create orders */
+  orderingEnabled?: boolean;
   announcement: string;
   taxRate: number;
   minOrderValue: number;
   peakHourThreshold: number;
   autoSettlementEnabled: boolean;
+  /** Orders per minute (for queue wait estimate). Default 10. */
+  servingRatePerMin?: number;
+  /** QR validity in minutes. Default 30. */
+  qrExpiryMinutes?: number;
 }
 
 export interface TransactionRecord {
@@ -99,6 +143,23 @@ export interface InventoryItem {
   lastUpdated: number;
   category: string;
 }
+
+/** Real-time inventory meta for students (totalStock, consumed from shard aggregation, lowStockThreshold) */
+export interface InventoryMetaItem {
+  itemId: string;
+  totalStock: number;
+  consumed: number;
+  lowStockThreshold: number;
+  /** Cached: totalStock - consumed (reduces client computation and bandwidth) */
+  available?: number;
+  /** Cached: AVAILABLE | LOW_STOCK | OUT_OF_STOCK (set by Cloud Functions) */
+  stockStatus?: StockStatus;
+  itemName?: string;
+  category?: string;
+}
+
+/** Stock visibility: AVAILABLE | LOW_STOCK | OUT_OF_STOCK */
+export type StockStatus = 'AVAILABLE' | 'LOW_STOCK' | 'OUT_OF_STOCK';
 
 export interface ScanLog {
   id: string;

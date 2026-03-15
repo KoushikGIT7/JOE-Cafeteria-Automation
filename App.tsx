@@ -3,6 +3,7 @@ import { useAuth } from './hooks/useAuth';
 import { initializeMenu, listenToLatestActiveQR } from './services/firestore-db';
 import SplashScreen from './components/SplashScreen';
 import { signInWithGoogle } from './services/auth';
+import { NotificationProvider } from './contexts/NotificationContext';
 
 // Views
 import WelcomeView from './views/Student/WelcomeView';
@@ -13,6 +14,7 @@ import AdminDashboard from './views/Admin/Dashboard';
 import PaymentView from './views/Student/PaymentView';
 import QRView from './views/Student/QRView';
 import ServingCounterView from './views/Staff/ServingCounterView';
+import KitchenView from './views/Staff/KitchenView';
 import OrdersView from './views/Student/OrdersView';
 import LoginView from './views/Auth/LoginView';
 
@@ -25,6 +27,7 @@ type ViewState =
   | 'CASHIER'
   | 'ADMIN'
   | 'SERVING_COUNTER'
+  | 'KITCHEN'
   | 'STAFF_LOGIN';
 
 const App: React.FC = () => {
@@ -144,7 +147,7 @@ const App: React.FC = () => {
       }
 
       // For staff/admin, or genuinely invalid views, route to exact portal
-      const validViews: ViewState[] = ['ADMIN', 'CASHIER', 'SERVING_COUNTER', 'HOME'];
+      const validViews: ViewState[] = ['ADMIN', 'CASHIER', 'SERVING_COUNTER', 'KITCHEN', 'HOME'];
       if (!validViews.includes(prev)) {
         console.log('🔄 [AUTH] Routing from invalid view:', prev, 'to valid portal:', targetView);
         return targetView;
@@ -240,29 +243,33 @@ const App: React.FC = () => {
     );
   }
 
-  // Render views with role-based protection
-  // Each portal view is protected - only accessible to users with matching role
-  switch (view) {
-    case 'WELCOME':
-      // 🚫 CRITICAL SAFETY: If user is already authenticated, NEVER show Welcome
-      // This is the final safety net to prevent Welcome → Payment → Welcome loops
-      if (user && profile && role) {
-        console.warn('🚨 [WELCOME] Authenticated user found on Welcome page, routing to portal immediately');
-        if (role === 'admin') return <AdminDashboard profile={profile} onLogout={handleLogout} />;
-        if (role === 'cashier') return <CashierView profile={profile} onLogout={handleLogout} />;
-        if (role === 'server') return <ServingCounterView profile={profile} onLogout={handleLogout} />;
-        return <HomeView profile={profile} onProceed={navigateToPayment} onLogout={handleLogout} />;
-      }
-      // Welcome is only meaningful when there is NO authenticated Firebase user
-      return (
-        <WelcomeView
-          onStart={handleStartOrdering}
-          onStaffLogin={navigateToLogin}
-          onAdminLogin={navigateToStaffLogin}
-          disabled={authLoading}
-        />
-      );
-    case 'HOME':
+  // Render views with role-based protection; NotificationProvider shows in-app toast for ORDER_READY
+  const navigateToOrderFromNotification = (orderId: string) => {
+    setSelectedOrderId(orderId);
+    setView('QR');
+  };
+
+  return (
+    <NotificationProvider onViewOrder={navigateToOrderFromNotification}>
+      {(() => {
+        switch (view) {
+          case 'WELCOME': {
+            if (user && profile && role) {
+              if (role === 'admin') return <AdminDashboard profile={profile} onLogout={handleLogout} />;
+              if (role === 'cashier') return <CashierView profile={profile} onLogout={handleLogout} />;
+              if (role === 'server') return <ServingCounterView profile={profile} onLogout={handleLogout} />;
+              return <HomeView profile={profile} onProceed={navigateToPayment} onLogout={handleLogout} />;
+            }
+            return (
+              <WelcomeView
+                onStart={handleStartOrdering}
+                onStaffLogin={navigateToLogin}
+                onAdminLogin={navigateToStaffLogin}
+                disabled={authLoading}
+              />
+            );
+          }
+          case 'HOME':
       // 🟢 HOME can be shown to both authenticated AND unauthenticated users (guest browsing)
       // For authenticated users, show full home view
       // For unauthenticated, guest can still browse (cart won't persist)
@@ -320,7 +327,7 @@ const App: React.FC = () => {
     case 'ADMIN':
       // Admin portal - ONLY accessible to admins
       if (profile && role === 'admin') {
-        return <AdminDashboard profile={profile} onLogout={handleLogout} />;
+        return <AdminDashboard profile={profile} onLogout={handleLogout} onOpenKitchen={() => setView('KITCHEN')} />;
       }
       console.warn('⚠️ Unauthorized access attempt to ADMIN portal. Role:', role);
       if (user && profile) {
@@ -333,10 +340,18 @@ const App: React.FC = () => {
           onAdminLogin={navigateToStaffLogin}
         />
       );
+    case 'KITCHEN':
+      if (profile && (role === 'server' || role === 'admin')) {
+        return <KitchenView onBack={() => setView(role === 'admin' ? 'ADMIN' : 'SERVING_COUNTER')} />;
+      }
+      if (user && profile) return <HomeView profile={profile} onProceed={navigateToPayment} onLogout={handleLogout} />;
+      return (
+        <WelcomeView onStart={handleStartOrdering} onStaffLogin={navigateToLogin} onAdminLogin={navigateToStaffLogin} />
+      );
     case 'SERVING_COUNTER':
       // Server portal - ONLY accessible to servers
       if (profile && role === 'server') {
-        return <ServingCounterView profile={profile} onLogout={handleLogout} />;
+        return <ServingCounterView profile={profile} onLogout={handleLogout} onOpenKitchen={() => setView('KITCHEN')} />;
       }
       console.warn('⚠️ Unauthorized access attempt to SERVING_COUNTER portal. Role:', role);
       if (user && profile) {
@@ -349,21 +364,21 @@ const App: React.FC = () => {
           onAdminLogin={navigateToStaffLogin}
         />
       );
-    default:
-      // 🟢 Default fallback: respect auth state to avoid welcome loop for logged-in users
-      if (user && profile) {
-        console.warn('⚠️ [DEFAULT] Unexpected view state, routing authenticated user to HOME');
-        return <HomeView profile={profile} onProceed={navigateToPayment} onLogout={handleLogout} />;
-      }
-      console.warn('⚠️ [DEFAULT] Unexpected view state, routing unauthenticated user to WELCOME');
-      return (
-        <WelcomeView
-          onStart={handleStartOrdering}
-          onStaffLogin={navigateToLogin}
-          onAdminLogin={navigateToStaffLogin}
-        />
-      );
-  }
+          default:
+            if (user && profile) {
+              return <HomeView profile={profile} onProceed={navigateToPayment} onLogout={handleLogout} />;
+            }
+            return (
+              <WelcomeView
+                onStart={handleStartOrdering}
+                onStaffLogin={navigateToLogin}
+                onAdminLogin={navigateToStaffLogin}
+              />
+            );
+        }
+      })()}
+    </NotificationProvider>
+  );
 };
 
 export default App;

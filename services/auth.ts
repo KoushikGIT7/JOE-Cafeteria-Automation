@@ -19,6 +19,7 @@ import {
 import { doc, getDoc, setDoc, serverTimestamp } from "firebase/firestore";
 import { auth, db } from "../firebase";
 import { UserProfile, UserRole } from "../types";
+import { registerFCMToken } from "./fcm";
 
 /**
  * Safe timestamp converter - handles Firestore Timestamp, Date, number, or undefined
@@ -465,6 +466,9 @@ export const onAuthStateChange = (
           await createUserProfile(firebaseUser.uid, firebaseUser.email || '', firebaseUser.displayName || 'Student', 'student');
           profile = await getUserProfile(firebaseUser.uid);
         }
+
+        // Register FCM token for push notifications (e.g. "Your order is ready for pickup")
+        registerFCMToken(firebaseUser.uid).catch(() => {});
 
         callback(firebaseUser, profile);
       } catch (error) {

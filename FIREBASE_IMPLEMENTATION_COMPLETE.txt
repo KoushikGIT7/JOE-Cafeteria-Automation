@@ -1,0 +1,330 @@
+================================================================================
+  JOE CAFETERIA — COMPLETE FIREBASE IMPLEMENTATION (ENTIRE PROJECT)
+  How Firebase is used across the application
+  Generated: 2025-03-14
+================================================================================
+
+1. OVERVIEW
+--------------------------------------------------------------------------------
+The project uses Firebase for:
+  • Authentication (Firebase Auth): sign-in, roles, session
+  • Database (Cloud Firestore): orders, menu, users, inventory, settings, logs
+  • Backend logic (Cloud Functions): order creation, payment confirm/reject,
+    QR validation, serve item, inventory updates (client cannot write orders/inventory)
+
+The React frontend talks to Firebase Auth and Firestore for reads and to
+Cloud Functions (Callables) for all critical writes when VITE_USE_CALLABLES
+is not set to "false".
+
+Backend (Node/Express in backend/) uses Firebase only for identity: it stores
+firebase_uid in PostgreSQL and issues JWT; it does not use Firestore or
+Firebase Admin in the current code paths.
+
+
+2. FIREBASE PRODUCTS IN USE
+--------------------------------------------------------------------------------
+  Product                 | Used  | Where / Purpose
+  ------------------------|-------|------------------------------------------
+  Firebase App (core)     | Yes   | firebase.ts — single init, config from env
+  Firebase Auth           | Yes   | Google OAuth, email/password, guest (no Auth)
+  Cloud Firestore         | Yes   | All app data; client reads, Functions write key collections
+  Cloud Functions         | Yes   | functions/ — createOrder, confirmPayment, etc.
+  Firebase Analytics      | No    | Disabled (avoids ad-blocker issues)
+  Firebase Storage        | No    | Not used
+  Firebase Admin SDK      | Backend package only | backend has firebase-admin; not used in backend/src
+
+  Frontend SDK: firebase ^12.8.0 (package.json)
+  Functions: firebase-admin, firebase-functions (functions/package.json)
+
+
+3. CONFIGURATION & INITIALIZATION
+--------------------------------------------------------------------------------
+  File: firebase.ts
+
+  3.1 App and config
+  • Single app: getApps().length === 0 ? initializeApp(firebaseConfig) : getApps()[0]
+  • firebaseConfig from import.meta.env.VITE_FIREBASE_* with fallbacks (project joecafe-a7fff)
+
+  3.2 Auth
+  • export const auth = getAuth(app)
+  • Default persistence (local) for web
+
+  3.3 Firestore
+  • Browser: initializeFirestore(app, { cache: persistentLocalCache() }) for offline
+  • Fallback: getFirestore(app) on failed-precondition (e.g. multiple tabs) or SSR
+  • export { db }
+
+  3.4 Analytics
+  • let analytics = null; export { analytics } — not initialized
+
+  Environment variables (vite-env.d.ts):
+  VITE_FIREBASE_API_KEY, VITE_FIREBASE_AUTH_DOMAIN, VITE_FIREBASE_PROJECT_ID,
+  VITE_FIREBASE_STORAGE_BUCKET, VITE_FIREBASE_MESSAGING_SENDER_ID,
+  VITE_FIREBASE_APP_ID, VITE_FIREBASE_MEASUREMENT_ID,
+  VITE_USE_CALLABLES, VITE_USE_FUNCTIONS_EMULATOR
+
+
+4. AUTHENTICATION — HOW IT WORKS
+--------------------------------------------------------------------------------
+  File: services/auth.ts (Firebase Auth + Firestore users collection)
+
+  4.1 Methods
+  • signInWithGoogle() — GoogleAuthProvider; popup (desktop) or redirect (mobile)
+  • signIn(email, password) — signInWithEmailAndPassword → getUserProfile → validate role/active
+  • signUp(email, password, name, role?, studentType?) — createUserWithEmailAndPassword + createUserProfile
+  • signOut() — Firebase signOut
+  • signInAsGuest(name, studentType?) — returns in-memory profile (uid like guest_*); no Firebase Auth
+  • onAuthStateChange(callback) — wraps onAuthStateChanged; handles getRedirectResult; callback(user, profile)
+  • getUserProfile(uid) — getDoc(users/{uid}); role validated/inferred from email; optional Firestore fix
+  • createUserProfile(uid, email, name, role, studentType?) — setDoc(users/{uid}, { merge: true })
+  • updateUserRole(uid, role), toggleUserStatus(uid, active) — setDoc merge
+
+  4.2 Profile storage
+  • Collection: users
+  • Document: users/{uid}
+  • Fields: uid, name, email, role, studentType, active, createdAt, lastActive
+  • Role inferred from email (admin@joe.com, cashier@joe.com, server@joe.com) if missing/wrong
+
+  4.3 useAuth hook (hooks/useAuth.ts)
+  • Subscribes to onAuthStateChange
+  • State: user (FirebaseUser | null), profile (UserProfile | null), loading, role
+  • role = profile?.role ?? null — used by App.tsx for routing
+
+  Used in: App.tsx (routing), LoginView (signIn), WelcomeView (signInWithGoogle), logout flow
+
+
+5. FIRESTORE — COLLECTIONS AND USAGE
+--------------------------------------------------------------------------------
+  All client access goes through services/firestore-db.ts (and services/reporting.ts for reports).
+  Cloud Functions (functions/index.js) write orders, inventory, serveLogs, scanLogs, flags.
+
+  5.1 users/{uid}
+  • Read: auth.ts (getUserProfile), firestore-db (getUserProfile, listenToAllUsers)
+  • Write: auth.ts (createUserProfile, updateUserRole, toggleUserStatus); rules allow own + admin
+  • Used for: login, role, profile, admin user list
+
+  5.2 menu/{itemId}
+  • Read: listenToMenu, getDocs(menu) in initializeMenu
+  • Write: addMenuItem, updateMenuItem, deleteMenuItem, initializeMenu (batch); rules: admin only
+  • Used for: HomeView menu, Admin menu CRUD, initialize on first load
+
+  5.3 orders/{orderId}
+  • Read: getOrder, listenToOrder, listenToAllOrders, listenToUserOrders, listenToAllUserOrders,
+    listenToLatestActiveQR, listenToPendingCashOrders, listenToActiveOrders, listenToPendingItems;
+    reporting.ts (fetchReport)
+  • Write: ONLY Cloud Functions (createOrder, confirmPayment, rejectPayment, validateQRCode, serveItem)
+  • Client create/update disabled in rules (allow create: false, allow update: false)
+  • Document shape: orderId, userId, userName, items[], totalAmount, paymentType, paymentStatus,
+    orderStatus, qrStatus, qr?, cafeteriaId, createdAt, scannedAt, servedAt, confirmedBy, confirmedAt,
+    rejectedBy, rejectedAt
+  • Used for: PaymentView (create via callable, listen), QRView (listen), CashierView (listen + confirm/reject),
+    ServingCounterView (validate QR + serve via callables), OrdersView, reporting
+
+  5.4 inventory/{itemId}
+  • Read: getInventory, listenToInventory; rules: admin/server/cashier
+  • Write: ONLY Cloud Functions (serveItem increments consumed; updateInventory callable); rules: allow write: false
+  • Used for: Admin inventory, serveItem in Functions
+
+  5.5 inventory_meta/{itemId}, inventory_shards/{itemId}/shards/{shardId}
+  • Defined in rules (read: staff; write: false). Reserved for future sharded counters.
+
+  5.6 settings/global
+  • Read: getSettings, listenToSettings; rules: read true
+  • Write: updateSettings; rules: admin only
+  • Used for: Admin dashboard, maintenance/announcement
+
+  5.7 scanLogs/{logId}
+  • Read: getScanLogs; rules: admin/server/cashier
+  • Write: ONLY Cloud Functions (validateQRCode creates log); rules: allow create: false
+  • Used for: Audit / server scan history
+
+  5.8 serveLogs/{logId}
+  • Read: getServeLogs; rules: admin/server/cashier
+  • Write: ONLY Cloud Functions (serveItem creates log); rules: allow create: false
+  • Used for: Audit / serving history
+
+  5.9 dailyReports/{reportId}
+  • Read: getDailyReport; rules: admin/cashier
+  • Write: admin only
+  • Used for: Reporting (optional)
+
+  5.10 carts/{userId}
+  • Read/Write: saveCartDraft; rules: own userId only
+  • Used for: Optional cart persistence (HomeView)
+
+  5.11 flags/{flagId}
+  • Read: admin only; Write: only Cloud Functions (onOrderCreated fraud trigger)
+  • Used for: Fraud detection (high order rate)
+
+
+6. CLOUD FUNCTIONS (functions/index.js)
+--------------------------------------------------------------------------------
+  Region: us-central1 (client uses getFunctions(app, "us-central1") in services/callables.ts)
+
+  • createOrder — Callable. Creates order in Firestore. Allows authenticated user or guest (data.userId starting with "guest_").
+  • confirmPayment — Callable. Cashier/admin. Sets paymentStatus SUCCESS, qrStatus ACTIVE, generates QR, confirmedBy/confirmedAt.
+  • rejectPayment — Callable. Cashier/admin. Sets paymentStatus REJECTED, orderStatus CANCELLED, qrStatus REJECTED.
+  • validateQRCode — Callable. Parses QR payload, verifies HMAC (QR_SECRET_KEY), updates order to qrStatus USED, orderStatus ACTIVE, writes scanLog.
+  • serveItem — Callable. Server/admin. Updates order items (servedQty, remainingQty), orderStatus COMPLETED if all served, writes serveLog, increments inventory.consumed.
+  • updateInventory — Callable. Admin. Create/update inventory doc (itemName, openingStock, consumed, category).
+  • cancelOrder — Callable. User (own order) or admin/cashier. Sets order CANCELLED / REJECTED.
+  • onOrderCreated — Firestore trigger on orders/{orderId} onCreate. Flags user if >10 orders in last hour (fraud).
+
+  QR verification in Functions uses same HMAC-SHA256 + base64url as client (services/qr.ts). Secret: process.env.QR_SECRET_KEY or default string.
+
+
+7. CLIENT — CALLABLES VS FIRESTORE
+--------------------------------------------------------------------------------
+  File: services/callables.ts
+  • getFunctions(app, "us-central1")
+  • connectFunctionsEmulator(functions, "localhost", 5001) when VITE_USE_FUNCTIONS_EMULATOR=true in dev
+  • Exports: createOrderCallable, confirmPaymentCallable, rejectPaymentCallable, validateQRCodeCallable,
+    serveItemCallable, updateInventoryCallable, cancelOrderCallable, useCallables()
+
+  File: services/firestore-db.ts
+  • useCallables() = (import.meta.env.VITE_USE_CALLABLES !== "false")
+  • When useCallables() is true:
+    - createOrder → createOrderCallable (payload: userId, userName, items, totalAmount, paymentType, paymentStatus, cafeteriaId)
+    - confirmCashPayment → confirmPaymentCallable({ orderId })
+    - rejectCashPayment → rejectPaymentCallable({ orderId })
+    - validateQRForServing → validateQRCodeCallable({ qrPayload }) then getOrder(orderId) and return Order
+    - serveItem → serveItemCallable({ orderId, itemId, servedBy })
+    - updateInventoryItem → updateInventoryCallable({ itemId, itemName?, openingStock?, consumed?, category? })
+  • When useCallables() is false: same functions use direct Firestore (setDoc/updateDoc/runTransaction). With current rules, orders/inventory client writes are disallowed, so production must use callables or relax rules.
+
+
+8. REAL-TIME LISTENERS (FIRESTORE)
+--------------------------------------------------------------------------------
+  All in firestore-db.ts; return unsubscribe function.
+
+  • listenToMenu — collection(menu), filter active, sort name in memory
+  • listenToOrder(orderId) — doc(orders, orderId)
+  • listenToAllOrders — orders orderBy createdAt desc
+  • listenToUserOrders(userId) — userId == X, paymentStatus in [SUCCESS, PENDING]
+  • listenToAllUserOrders(userId) — userId == X
+  • listenToLatestActiveQR(userId) — userId, paymentStatus SUCCESS, qrStatus ACTIVE; then latest by createdAt
+  • listenToPendingCashOrders — paymentType CASH, paymentStatus PENDING, orderBy createdAt desc
+  • listenToActiveOrders — orderStatus ACTIVE, paymentStatus SUCCESS, qrStatus USED, orderBy scannedAt desc
+  • listenToPendingItems — same query as listenToActiveOrders; flattens items with remainingQty > 0
+  • listenToAllUsers — collection(users); sort by createdAt in memory
+  • listenToInventory — collection(inventory)
+  • listenToSettings — doc(settings, global)
+
+
+9. REPORTING (services/reporting.ts)
+--------------------------------------------------------------------------------
+  • Imports: collection, getDocs, query, where, orderBy from firebase/firestore; db from firebase
+  • fetchReport({ role, start, end }) — queries orders by createdAt range and paymentStatus; 5-min cache
+  • computeReport — aggregates revenue, payment split, item sales, trend, peak hours
+  • invalidateReportsCache — called after createOrder, confirmCashPayment, rejectCashPayment
+  • exportReport — PDF/CSV/XLSX/JSON/PNG from report data
+
+
+10. SECURITY RULES (firestore.rules) — SUMMARY
+--------------------------------------------------------------------------------
+  • users: read own or admin; create/update own or admin; delete admin
+  • menu: read all; write admin
+  • orders: read all; create false; update false; delete admin (only Functions write)
+  • inventory: read admin/server/cashier; write false (only Functions)
+  • inventory_meta, inventory_shards: read staff; write false
+  • settings: read all; write admin
+  • scanLogs: read staff; create false; update/delete admin
+  • serveLogs: read staff; create false; update/delete admin
+  • dailyReports: read admin or cashier; write admin
+  • carts: read/write own userId
+  • flags: read admin; write false (Functions write)
+
+
+11. FIRESTORE INDEXES (firestore.indexes.json)
+--------------------------------------------------------------------------------
+  Orders composite indexes:
+  • paymentType ASC, paymentStatus ASC, createdAt DESC
+  • orderStatus ASC, paymentStatus ASC, qrStatus ASC, scannedAt DESC
+  • userId ASC, paymentStatus ASC, createdAt DESC
+  • createdAt ASC, paymentStatus ASC
+  • userId ASC, createdAt ASC
+  • orderStatus ASC, createdAt DESC
+
+  (serveLogs and scanLogs use single-field indexes; no composite in file.)
+
+
+12. WHERE FIREBASE IS USED IN THE APP (BY FILE)
+--------------------------------------------------------------------------------
+  App.tsx
+    useAuth(), initializeMenu(), listenToLatestActiveQR(), signInWithGoogle()
+  views/Student/WelcomeView
+    signInWithGoogle (via App or direct)
+  views/Student/HomeView
+    listenToMenu(), listenToUserOrders(), saveCartDraft()
+  views/Student/PaymentView
+    createOrder(), listenToOrder(), getOrder()
+  views/Student/QRView
+    listenToOrder(); updateDoc (optional, on db)
+  views/Student/OrdersView
+    listenToAllUserOrders()
+  views/Staff/CashierView
+    listenToPendingCashOrders(), confirmCashPayment(), rejectCashPayment(), listenToAllOrders()
+  views/Staff/ServingCounterView
+    listenToActiveOrders(), listenToPendingItems(), serveItem(), validateQRForServing()
+  views/Staff/ScannerView
+    scanAndServeOrder() (legacy; may use direct Firestore if not callable path)
+  views/Admin/Dashboard
+    listenToSettings, updateSettings, listenToInventory, updateInventoryItem, listenToAllOrders, getScanLogs, getServeLogs, reporting
+  views/Auth/LoginView
+    signIn() from services/auth
+  hooks/useAuth
+    onAuthStateChange (services/auth)
+  pages/SetupPage
+    initializeFirebase (scripts/initializeFirebase) — one-time Firestore init
+  utils/offlineDetector
+    References Firestore connection health
+  scripts/initializeFirebase.ts
+    createUserWithEmailAndPassword, signInWithEmailAndPassword, setDoc, getDoc, writeBatch (Firestore init)
+  scripts/fixStaffRoles.js
+    signInWithEmailAndPassword, Firestore getDoc/setDoc on users (fix roles)
+
+
+13. BACKEND (backend/) — FIREBASE REFERENCE
+--------------------------------------------------------------------------------
+  • backend does NOT use Firestore or Firebase Admin in controllers/services.
+  • backend/src/controllers/auth.controller.ts — accepts firebaseUid, email, name; creates/fetches user by firebase_uid in PostgreSQL.
+  • backend/src/services/user.service.ts — createUser(firebaseUid, ...), getUserByFirebaseUid(firebaseUid).
+  • backend/src/middleware/validation.ts — firebaseUid in body validation.
+  • backend/src/migrations/001_initial_schema.ts — users.firebase_uid column.
+  • backend/package.json — firebase-admin dependency (for future use if needed).
+
+
+14. FILE REFERENCE — FIREBASE-RELATED FILES
+--------------------------------------------------------------------------------
+  firebase.ts                 — App, Auth, Firestore init; analytics disabled
+  firestore.rules            — Security rules
+  firestore.indexes.json     — Composite indexes for orders
+  firebase.json              — firestore rules/indexes; functions source
+  vite-env.d.ts              — VITE_FIREBASE_*, VITE_USE_CALLABLES, VITE_USE_FUNCTIONS_EMULATOR
+  services/auth.ts           — Firebase Auth + Firestore users (profile, role)
+  services/callables.ts      — Cloud Functions callable references (region us-central1)
+  services/firestore-db.ts   — All Firestore reads/writes and callable-backed mutations
+  services/firestore.ts      — Alternate schema/atomic helpers (optional; not primary path)
+  services/reporting.ts      — Firestore queries for reports + cache + export
+  services/qr.ts             — QR HMAC generation/verification (client; same algo as Functions)
+  hooks/useAuth.ts           — useAuth() from onAuthStateChange
+  functions/package.json     — Node 18, firebase-admin, firebase-functions
+  functions/index.js         — createOrder, confirmPayment, rejectPayment, validateQRCode, serveItem, updateInventory, cancelOrder, onOrderCreated
+  scripts/initializeFirebase.ts — One-time Firestore seed
+  scripts/fixStaffRoles.js   — Fix staff roles in Firestore users
+  FUNCTIONS_DEPLOY.md        — How to deploy Cloud Functions
+  BACKEND_OPTIMIZATION_BLUEPRINT.md — Architecture and scaling notes
+
+
+15. DEPLOYMENT
+--------------------------------------------------------------------------------
+  Firestore rules + indexes:
+    firebase deploy --only firestore
+  Cloud Functions (requires Blaze plan):
+    cd functions && npm install && cd .. && firebase deploy --only functions
+  Set QR secret for Functions (optional): same as client VITE_QR_SECRET_KEY or default in services/qr.ts — e.g. QR_SECRET_KEY in Functions config or Secret Manager.
+
+
+================================================================================
+  END OF FIREBASE IMPLEMENTATION (COMPLETE)
+================================================================================

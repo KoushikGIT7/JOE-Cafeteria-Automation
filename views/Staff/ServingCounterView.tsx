@@ -6,10 +6,12 @@ import { listenToActiveOrders, listenToPendingItems, serveItem, validateQRForSer
 import { initializeScanner, getScanner } from '../../services/scanner';
 import { offlineDetector } from '../../utils/offlineDetector';
 import SyncStatus from '../../components/SyncStatus';
+import QRScanner from '../../components/QRScanner';
 
 interface ServingCounterViewProps {
   profile: UserProfile;
   onLogout?: () => void;
+  onOpenKitchen?: () => void;
 }
 
 interface ReadyItem {
@@ -23,7 +25,7 @@ interface ReadyItem {
   servedQty: number;
 }
 
-const ServingCounterView: React.FC<ServingCounterViewProps> = ({ profile, onLogout }) => {
+const ServingCounterView: React.FC<ServingCounterViewProps> = ({ profile, onLogout, onOpenKitchen }) => {
   const [readyItems, setReadyItems] = useState<ReadyItem[]>([]);
   const [pendingItems, setPendingItems] = useState<PendingItem[]>([]);
   const [error, setError] = useState<{ type: string; message: string } | null>(null);
@@ -34,6 +36,9 @@ const ServingCounterView: React.FC<ServingCounterViewProps> = ({ profile, onLogo
   const [orderSearch, setOrderSearch] = useState('');
   const [searchResults, setSearchResults] = useState<PendingItem[]>([]);
   const [isScanning, setIsScanning] = useState(false);
+  const [isManualModalOpen, setIsManualModalOpen] = useState(false);
+  const [manualQRInput, setManualQRInput] = useState('');
+  const [isCameraOpen, setIsCameraOpen] = useState(false);
 
   // Initialize hardware scanner
   useEffect(() => {
@@ -192,15 +197,9 @@ const ServingCounterView: React.FC<ServingCounterViewProps> = ({ profile, onLogo
     await processQRScan(qrData);
   };
 
-  const handleQRScan = async () => {
-    // Fallback for manual input (testing/debugging)
-    const qrData = prompt("SCAN QR CODE\nPaste QR token data (JSON format):");
-    if (!qrData || !qrData.trim()) {
-      console.log('⚠️ No QR data provided');
-      return;
-    }
-    console.log('📋 Manual QR scan triggered with:', qrData);
-    await processQRScan(qrData);
+  const handleQRScan = () => {
+    // Open camera by default on mobile, or provide options
+    setIsCameraOpen(true);
   };
 
   const processQRScan = async (qrData: string) => {
@@ -313,6 +312,8 @@ const ServingCounterView: React.FC<ServingCounterViewProps> = ({ profile, onLogo
         setError({ type: 'ERROR', message: err.message || 'Order not found. Please ensure order exists and payment is confirmed.' });
       } else if (err.message.includes('Already Completed')) {
         setError({ type: 'COMPLETED', message: 'Order Already Completed' });
+      } else if (err.message.includes('NOT_READY') || err.message.includes('pickup time')) {
+        setError({ type: 'NOT_READY', message: 'Please come at your pickup time.' });
       } else if (err.message.includes('QR_CODE_EXPIRED') || err.message.includes('expired')) {
         setError({ type: 'EXPIRED', message: 'QR Code Expired' });
       } else {
@@ -382,113 +383,209 @@ const ServingCounterView: React.FC<ServingCounterViewProps> = ({ profile, onLogo
 
   // Items are displayed individually, not grouped
 
-  // Show success screen with order details
-  if (success) {
-    return (
-      <div className="h-screen w-screen bg-green-600 flex flex-col items-center justify-center text-white p-4 sm:p-6 lg:p-8">
-        <CheckCircle className="w-24 h-24 sm:w-32 sm:h-32 lg:w-40 lg:h-40 mb-4 sm:mb-6 lg:mb-8 animate-pulse" />
-        <h1 className="text-3xl sm:text-4xl lg:text-5xl xl:text-7xl font-black mb-4 sm:mb-6 uppercase tracking-wider text-center">
-          QR SCANNED
-        </h1>
-        <div className="bg-white/20 backdrop-blur rounded-2xl sm:rounded-3xl p-4 sm:p-6 lg:p-8 mb-4 sm:mb-6 lg:mb-8 max-w-2xl w-full">
-          <div className="bg-black/30 text-white px-4 sm:px-6 py-3 sm:py-4 rounded-xl mb-4 sm:mb-6 text-center">
-            <p className="text-[10px] sm:text-xs font-black uppercase tracking-widest text-gray-300 mb-1">ORDER NO</p>
-            <p className="text-2xl sm:text-3xl lg:text-4xl font-black">#{success.orderNumber}</p>
-          </div>
-          <div className="space-y-2 sm:space-y-3">
-            <p className="text-lg sm:text-xl lg:text-2xl font-black uppercase tracking-wider mb-3 sm:mb-4">Order Items:</p>
-            {success.items.map((item, index) => (
-              <div key={index} className="bg-white/10 rounded-xl p-3 sm:p-4 text-left">
-                <p className="text-base sm:text-lg lg:text-xl font-black">{item}</p>
-              </div>
-            ))}
-          </div>
-        </div>
-        <p className="text-xl sm:text-2xl lg:text-3xl font-bold text-center mb-4 sm:mb-6 lg:mb-8 px-4">Order loaded to serving queue</p>
-        <button
-          onClick={() => {
-            setSuccess(null);
-            const scanner = getScanner();
-            if (scanner) scanner.focus();
-          }}
-          className="mt-4 sm:mt-6 lg:mt-8 bg-white text-green-600 px-8 sm:px-12 lg:px-16 py-4 sm:py-6 lg:py-8 rounded-2xl sm:rounded-3xl text-xl sm:text-2xl lg:text-3xl font-black uppercase tracking-wider active:scale-95 transition-all shadow-2xl"
-        >
-          CONTINUE
-        </button>
-      </div>
-    );
-  }
+  const dismissSuccess = () => {
+    setSuccess(null);
+    const scanner = getScanner();
+    if (scanner) setTimeout(() => scanner.focus(), 50);
+  };
 
-  if (error) {
-    return (
-      <div className="h-screen w-screen bg-red-600 flex flex-col items-center justify-center text-white p-4 sm:p-6 lg:p-8">
-        <AlertCircle className="w-24 h-24 sm:w-32 sm:h-32 lg:w-40 lg:h-40 mb-4 sm:mb-6 lg:mb-8 animate-pulse" />
-        <h1 className="text-3xl sm:text-4xl lg:text-5xl xl:text-7xl font-black mb-4 sm:mb-6 uppercase tracking-wider text-center px-4">
-          {error.type === 'USED' ? 'ALREADY USED' : 
-           error.type === 'PAYMENT' ? 'PAYMENT INVALID' : 
-           error.type === 'INVALID' ? 'INVALID QR' : 
-           error.type === 'COMPLETED' ? 'ORDER COMPLETED' : 
-           error.type === 'EXPIRED' ? 'QR EXPIRED' :
-           'NETWORK ERROR'}
-        </h1>
-        <p className="text-xl sm:text-2xl lg:text-3xl xl:text-4xl font-bold text-center mb-4 sm:mb-6 lg:mb-8 px-4">{error.message}</p>
-        <button
-          onClick={() => {
-            setError(null);
-            const scanner = getScanner();
-            if (scanner) scanner.focus();
-          }}
-          className="mt-4 sm:mt-6 lg:mt-8 bg-white text-red-600 px-8 sm:px-12 lg:px-16 py-4 sm:py-6 lg:py-8 rounded-2xl sm:rounded-3xl text-xl sm:text-2xl lg:text-3xl font-black uppercase tracking-wider active:scale-95 transition-all shadow-2xl"
-        >
-          CONTINUE
-        </button>
-      </div>
-    );
-  }
+  const dismissError = () => {
+    setError(null);
+    const scanner = getScanner();
+    if (scanner) setTimeout(() => scanner.focus(), 50);
+  };
 
   return (
-    <div className="h-screen w-screen bg-gray-50 flex flex-col overflow-hidden">
-      {/* Top Bar */}
-      <div className="bg-white border-b-4 border-gray-300 p-3 sm:p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 sm:gap-0 flex-shrink-0">
-        <div className="flex items-center gap-3 sm:gap-6 w-full sm:w-auto justify-between">
-          <h1 className="text-xl sm:text-2xl lg:text-3xl font-black text-gray-900">JOE CAFETERIA</h1>
-          <SyncStatus showLabel={true} />
-        </div>
-        <div className="flex items-center gap-3 sm:gap-4 lg:gap-6 w-full sm:w-auto justify-end">
-          <div className="text-lg sm:text-xl lg:text-3xl font-black text-gray-800">
-            {currentTime.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true }).toUpperCase()}
+    <div className="h-screen w-screen bg-gray-50 flex flex-col overflow-hidden relative">
+      {/* 📸 Real Camera Scanner Overlay */}
+      {isCameraOpen && (
+        <QRScanner 
+          onScan={(data) => {
+            setIsCameraOpen(false);
+            processQRScan(data);
+          }}
+          onClose={() => setIsCameraOpen(false)}
+          isScanning={isScanning}
+        />
+      )}
+      {/* Order confirmation panel — overlay; scanner layout stays visible underneath */}
+      {success && (
+        <div
+          className="absolute inset-0 z-[100] flex items-end sm:items-center justify-center p-0 sm:p-4 bg-black/20 sm:bg-black/30"
+          onClick={dismissSuccess}
+          aria-hidden="true"
+        >
+          <div
+            className="w-full bg-green-600 text-white rounded-t-3xl sm:rounded-2xl shadow-2xl border-t-4 border-green-700 sm:max-w-md pointer-events-auto flex flex-col max-h-[85vh] sm:max-h-[80vh]"
+            style={{ animation: 'slideUp 0.25s ease-out' }}
+            role="alert"
+            aria-live="polite"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="p-4 sm:p-5 flex-shrink-0 flex items-center justify-between gap-3">
+              <div className="flex items-center gap-3">
+                <CheckCircle className="w-10 h-10 sm:w-12 sm:h-12 flex-shrink-0 text-green-200" />
+                <div>
+                  <p className="text-xs font-bold uppercase tracking-widest text-green-200">Order loaded</p>
+                  <p className="text-xl sm:text-2xl font-black">#{success.orderNumber}</p>
+                </div>
+              </div>
+              <button
+                onClick={dismissSuccess}
+                className="min-h-[44px] min-w-[44px] flex items-center justify-center rounded-xl bg-white/20 hover:bg-white/30 text-white font-black text-sm uppercase active:scale-95 transition-all"
+                aria-label="Continue scanning"
+              >
+                OK
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto px-4 pb-4 space-y-2 border-t border-green-500/50 pt-3">
+              {success.items.map((item, index) => (
+                <div key={index} className="bg-white/10 rounded-xl px-3 py-2.5">
+                  <p className="text-sm sm:text-base font-bold">{item}</p>
+                </div>
+              ))}
+            </div>
+            <p className="px-4 pb-4 pt-1 text-center text-sm text-green-100 font-medium">Scan next QR or tap OK</p>
           </div>
+        </div>
+      )}
+
+      {/* Error toast — fixed top, auto-dismiss; does not block layout */}
+      {error && (
+        <div
+          className="fixed top-4 left-4 right-4 sm:left-auto sm:right-4 sm:max-w-sm z-[100] bg-red-600 text-white rounded-2xl shadow-2xl border-2 border-red-700 p-4 flex items-start gap-3"
+            style={{ animation: 'slideDown 0.2s ease-out' }}
+          role="alert"
+          aria-live="assertive"
+        >
+          <AlertCircle className="w-8 h-8 sm:w-10 sm:h-10 flex-shrink-0 text-red-200" />
+          <div className="flex-1 min-w-0">
+            <p className="text-sm font-black uppercase tracking-wide text-red-100">
+              {error.type === 'USED' ? 'Already used' : error.type === 'PAYMENT' ? 'Payment invalid' : error.type === 'INVALID' ? 'Invalid QR' : error.type === 'COMPLETED' ? 'Order completed' : error.type === 'EXPIRED' ? 'QR expired' : error.type === 'NOT_READY' ? 'Not ready' : 'Error'}
+            </p>
+            <p className="text-base font-bold mt-0.5">{error.message}</p>
+          </div>
+          <button
+            onClick={dismissError}
+            className="min-h-[44px] min-w-[44px] flex items-center justify-center rounded-xl bg-white/20 hover:bg-white/30 font-black text-sm uppercase active:scale-95 transition-all flex-shrink-0"
+            aria-label="Dismiss"
+          >
+            OK
+          </button>
+        </div>
+      )}
+
+      {/* Manual QR entry modal (opened via floating scan button) */}
+      {isManualModalOpen && (
+        <div
+          className="absolute inset-0 z-[90] flex items-center justify-center bg-black/40 px-4"
+          aria-modal="true"
+          role="dialog"
+        >
+          <div className="w-full max-w-md bg-white rounded-2xl shadow-2xl border border-gray-200 p-4 sm:p-6">
+            <h2 className="text-lg sm:text-xl font-black text-gray-900 mb-2 flex items-center gap-2">
+              <Scan className="w-5 h-5 text-primary" />
+              Enter / Scan QR Code
+            </h2>
+            <p className="text-sm text-gray-500 mb-4">
+              Use the handheld scanner or paste the QR token data here. Items will appear after a successful scan.
+            </p>
+            <textarea
+              value={manualQRInput}
+              onChange={(e) => setManualQRInput(e.target.value)}
+              rows={4}
+              className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm font-mono resize-none focus:outline-none focus:ring-2 focus:ring-primary/60 focus:border-primary"
+              placeholder="Paste QR token (JSON or encoded string)…"
+            />
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                type="button"
+                className="px-4 py-2 rounded-xl bg-gray-100 text-gray-700 text-sm font-bold hover:bg-gray-200 active:scale-95"
+                onClick={() => {
+                  setIsManualModalOpen(false);
+                  setManualQRInput('');
+                  const scanner = getScanner();
+                  if (scanner) setTimeout(() => scanner.focus(), 100);
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="px-4 py-2 rounded-xl bg-primary text-white text-sm font-black hover:bg-primary/90 active:scale-95 disabled:opacity-60"
+                disabled={!manualQRInput.trim() || isScanning}
+                onClick={async () => {
+                  if (!manualQRInput.trim()) return;
+                  await processQRScan(manualQRInput);
+                  // processQRScan will manage isScanning and focus; keep modal open only on error
+                  setIsManualModalOpen(false);
+                  setManualQRInput('');
+                }}
+              >
+                Scan
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Top Bar — compact on mobile */}
+      <header className="bg-white border-b-2 sm:border-b-4 border-gray-300 px-3 py-2 sm:p-4 flex flex-row items-center justify-between gap-2 flex-shrink-0">
+        <div className="flex items-center gap-2 sm:gap-4 min-w-0">
+          <h1 className="text-base sm:text-xl md:text-2xl lg:text-3xl font-black text-gray-900 truncate">JOE</h1>
+          <SyncStatus showLabel={false} />
+        </div>
+        <div className="flex items-center gap-2 sm:gap-4 flex-shrink-0">
+          <span className="text-sm sm:text-lg lg:text-xl font-black text-gray-800 tabular-nums">
+            {currentTime.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })}
+          </span>
+          {onOpenKitchen && (
+            <button
+              onClick={onOpenKitchen}
+              className="min-h-[44px] min-w-[44px] sm:min-w-0 sm:px-4 bg-amber-500 hover:bg-amber-600 text-white p-2 sm:py-2.5 sm:px-4 rounded-xl text-sm font-black uppercase tracking-wider shadow active:scale-95 transition-transform flex items-center justify-center"
+              title="Kitchen"
+              aria-label="Kitchen"
+            >
+              <span className="hidden md:inline">KITCHEN</span>
+            </button>
+          )}
           {onLogout && (
             <button
               onClick={onLogout}
-              className="bg-red-500 hover:bg-red-600 text-white px-4 sm:px-6 py-2 sm:py-4 rounded-xl text-sm sm:text-lg font-black uppercase tracking-wider shadow-lg active:scale-95 transition-all flex items-center justify-center gap-2"
+              className="min-h-[44px] min-w-[44px] sm:min-w-0 sm:px-4 bg-red-500 hover:bg-red-600 text-white p-2 sm:py-2.5 sm:px-4 rounded-xl text-sm font-black uppercase tracking-wider shadow active:scale-95 transition-transform flex items-center justify-center"
               title="Logout"
+              aria-label="Logout"
             >
-              <LogOut className="w-4 h-4 sm:w-5 sm:h-5" />
-              <span className="hidden sm:inline">LOGOUT</span>
+              <LogOut className="w-5 h-5" />
+              <span className="hidden md:inline ml-1">LOGOUT</span>
             </button>
           )}
         </div>
-      </div>
+      </header>
 
-      {/* Main Layout */}
-      <div className="flex-1 flex flex-col lg:flex-row overflow-hidden">
-        {/* LEFT SIDE - READY TO SERVE QUEUE */}
-        <div className="w-full lg:w-2/3 border-r-0 lg:border-r-4 border-gray-300 flex flex-col bg-white overflow-y-auto">
-          <div className="bg-green-500 text-white p-3 sm:p-4 border-b-4 border-green-600 sticky top-0 z-10">
-            <div className="flex items-center justify-between">
-              <h2 className="text-xl sm:text-2xl lg:text-3xl font-black uppercase tracking-wider">READY TO SERVE</h2>
-            </div>
+      {/* Main Layout — mobile: single column (Ready first); tablet+: two columns */}
+      <div className="flex-1 flex flex-col md:flex-row overflow-hidden min-h-0">
+        {/* LEFT — READY TO SERVE (primary on all sizes) */}
+        <section
+          className="w-full md:w-2/3 flex flex-col bg-white overflow-hidden border-b-2 md:border-b-0 md:border-r-2 border-gray-200 flex-shrink-0 md:min-w-0"
+          aria-label="Ready to serve queue"
+        >
+          <div className="bg-green-500 text-white px-3 py-2.5 sm:p-4 border-b-2 border-green-600 sticky top-0 z-10 flex items-center justify-between flex-shrink-0">
+            <h2 className="text-base sm:text-xl md:text-2xl font-black uppercase tracking-wider">Ready to serve</h2>
+            <span className="flex items-center gap-1.5 text-green-100 text-xs font-bold">
+              <span className="w-2 h-2 rounded-full bg-green-200 animate-pulse" aria-hidden />
+              Scan active
+            </span>
           </div>
 
-          <div className="flex-1 p-3 sm:p-4 lg:p-6 space-y-4 sm:space-y-6">
+          <div className="flex-1 overflow-y-auto p-3 sm:p-4 space-y-3 sm:space-y-4 min-h-0">
             {readyItems.length === 0 ? (
-              <div className="flex flex-col items-center justify-center h-full text-center px-4">
-                <div className="w-32 h-32 sm:w-48 sm:h-48 lg:w-64 lg:h-64 border-4 sm:border-6 lg:border-8 border-green-300 rounded-2xl flex items-center justify-center bg-gray-50 mb-4 sm:mb-6 lg:mb-8">
-                  <Scan className="w-16 h-16 sm:w-24 sm:h-24 lg:w-32 lg:h-32 text-green-300" />
+              <div className="flex flex-col items-center justify-center min-h-[200px] sm:min-h-[280px] text-center px-4">
+                <div className="w-24 h-24 sm:w-32 sm:h-32 border-4 border-green-300 rounded-2xl flex items-center justify-center bg-green-50/50 mb-3 sm:mb-4">
+                  <Scan className="w-10 h-10 sm:w-14 sm:h-14 text-green-400" />
                 </div>
-                <p className="text-2xl sm:text-3xl lg:text-4xl font-black text-gray-400">SCAN QR TO START</p>
-                <p className="text-lg sm:text-xl lg:text-2xl text-gray-500 mt-2 sm:mt-4">Items will appear here after QR scan</p>
+                <p className="text-lg sm:text-xl font-black text-gray-500">Scan QR to start</p>
+                <p className="text-sm text-gray-400 mt-1">Items appear here after scan</p>
               </div>
             ) : (
               (() => {
@@ -509,7 +606,7 @@ const ServingCounterView: React.FC<ServingCounterViewProps> = ({ profile, onLogo
                     </div>
                     
                     <div className="space-y-2 sm:space-y-3">
-                      {items.map((item) => {
+                      {(items as ReadyItem[]).map((item) => {
                         const key = `${item.orderId}_${item.itemId}`;
                         const isServing = servingKey === key;
 
@@ -536,10 +633,14 @@ const ServingCounterView: React.FC<ServingCounterViewProps> = ({ profile, onLogo
                             <button
                               onClick={() => handleServeReadyItem(item)}
                               disabled={isServing}
-                              className="bg-green-500 hover:bg-green-600 text-white px-4 sm:px-6 lg:px-8 py-3 sm:py-4 lg:py-5 rounded-xl text-base sm:text-lg lg:text-xl font-black uppercase tracking-wider shadow-lg active:scale-95 transition-all disabled:opacity-50 flex items-center justify-center gap-2 w-full sm:w-auto sm:min-w-[140px]"
+                              className="min-h-[48px] sm:min-h-[52px] bg-green-500 hover:bg-green-600 active:scale-[0.98] text-white px-5 sm:px-6 py-3 rounded-xl text-base sm:text-lg font-black uppercase tracking-wider shadow-lg transition-transform disabled:opacity-60 disabled:pointer-events-none flex items-center justify-center gap-2 w-full sm:w-auto sm:min-w-[140px] touch-manipulation"
+                              aria-label={isServing ? 'Serving' : `Serve ${item.itemName}`}
                             >
-                              <CheckCircle className="w-5 h-5 sm:w-6 sm:h-6" />
-                              {isServing ? 'SERVING...' : 'SERVE'}
+                              {isServing ? (
+                                <span className="inline-flex items-center gap-2"><span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" /> Serving</span>
+                              ) : (
+                                <><CheckCircle className="w-5 h-5 sm:w-6 sm:h-6" /> Serve</>
+                              )}
                             </button>
                           </div>
                         );
@@ -550,12 +651,15 @@ const ServingCounterView: React.FC<ServingCounterViewProps> = ({ profile, onLogo
               })()
             )}
           </div>
-        </div>
+        </section>
 
-        {/* RIGHT SIDE - PENDING ITEMS & SEARCH */}
-        <div className="w-full lg:w-1/3 flex flex-col bg-amber-50 overflow-y-auto border-t-4 lg:border-t-0 border-amber-300">
-          <div className="bg-amber-500 text-white p-3 sm:p-4 text-center border-b-4 border-amber-600 sticky top-0 z-10">
-            <h2 className="text-xl sm:text-2xl lg:text-3xl font-black uppercase tracking-wider">PENDING ITEMS</h2>
+        {/* RIGHT — PENDING ITEMS & SEARCH (tablet+: side panel) */}
+        <section
+          className="w-full md:w-1/3 flex flex-col bg-amber-50/80 overflow-hidden border-t-2 md:border-t-0 md:border-l-2 border-amber-200 flex-shrink-0 md:min-w-0"
+          aria-label="Pending items"
+        >
+          <div className="bg-amber-500 text-white px-3 py-2.5 sm:p-4 border-b-2 border-amber-600 sticky top-0 z-10 flex-shrink-0">
+            <h2 className="text-base sm:text-xl md:text-2xl font-black uppercase tracking-wider text-center">Pending</h2>
           </div>
 
           {/* Order Number Search */}
@@ -603,10 +707,11 @@ const ServingCounterView: React.FC<ServingCounterViewProps> = ({ profile, onLogo
                       <button
                         onClick={() => handleServePending(pendingItem)}
                         disabled={isServing}
-                        className="bg-amber-500 hover:bg-amber-600 text-white px-4 sm:px-6 py-3 sm:py-4 rounded-xl text-sm sm:text-base lg:text-lg font-black uppercase tracking-wider shadow-lg active:scale-95 transition-all disabled:opacity-50 flex items-center justify-center gap-2 w-full sm:w-auto sm:min-w-[120px]"
+                        className="min-h-[48px] bg-amber-500 hover:bg-amber-600 active:scale-[0.98] text-white px-4 sm:px-5 py-3 rounded-xl text-sm sm:text-base font-black uppercase tracking-wider shadow-lg transition-transform disabled:opacity-60 disabled:pointer-events-none flex items-center justify-center gap-2 w-full sm:w-auto sm:min-w-[120px] touch-manipulation"
+                        aria-label={isServing ? 'Serving' : `Serve ${pendingItem.itemName}`}
                       >
-                        <CheckCircle className="w-4 h-4 sm:w-5 sm:h-5" />
-                        {isServing ? 'SERVING...' : 'SERVE'}
+                        {isServing ? <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" /> : <CheckCircle className="w-4 h-4 sm:w-5 sm:h-5" />}
+                        {isServing ? 'Serving' : 'Serve'}
                       </button>
                     </div>
                   );
@@ -652,35 +757,39 @@ const ServingCounterView: React.FC<ServingCounterViewProps> = ({ profile, onLogo
                     <button
                       onClick={() => handleServePending(pendingItem)}
                       disabled={isServing}
-                      className="bg-amber-500 hover:bg-amber-600 text-white px-4 sm:px-6 py-3 sm:py-4 rounded-xl text-sm sm:text-base lg:text-lg font-black uppercase tracking-wider shadow-lg active:scale-95 transition-all disabled:opacity-50 flex items-center justify-center gap-2 w-full sm:w-auto sm:min-w-[120px]"
+                      className="min-h-[48px] bg-amber-500 hover:bg-amber-600 active:scale-[0.98] text-white px-4 sm:px-5 py-3 rounded-xl text-sm sm:text-base font-black uppercase tracking-wider shadow-lg transition-transform disabled:opacity-60 disabled:pointer-events-none flex items-center justify-center gap-2 w-full sm:w-auto sm:min-w-[120px] touch-manipulation"
+                      aria-label={isServing ? 'Serving' : `Serve ${pendingItem.itemName}`}
                     >
-                      <CheckCircle className="w-4 h-4 sm:w-5 sm:h-5" />
-                      {isServing ? 'SERVING...' : 'SERVE'}
+                      {isServing ? <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" /> : <CheckCircle className="w-4 h-4 sm:w-5 sm:h-5" />}
+                      {isServing ? 'Serving' : 'Serve'}
                     </button>
                   </div>
                 );
               })
             )}
           </div>
-        </div>
+        </section>
       </div>
 
-      {/* Floating Scan Button (Always Visible for Crowd Management) */}
-      <div className="fixed bottom-4 right-4 sm:bottom-6 sm:right-6 lg:bottom-8 lg:right-8 z-50">
+      {/* Floating scan trigger — always visible; hardware scanner stays focused via hidden input */}
+      <div className="fixed bottom-4 right-4 sm:bottom-5 sm:right-5 md:bottom-6 md:right-6 z-50">
         <button
           onClick={handleQRScan}
           disabled={isScanning}
-          className={`bg-primary hover:bg-primary/90 text-white w-16 h-16 sm:w-20 sm:h-20 lg:w-24 lg:h-24 rounded-full shadow-2xl active:scale-95 transition-all flex items-center justify-center border-2 sm:border-3 lg:border-4 border-white ${
-            isScanning ? 'animate-spin' : 'animate-pulse'
-          } disabled:opacity-50`}
-          title={isScanning ? "Scanning in progress..." : "Scan QR Code - Click to manually enter QR data"}
+          className="min-h-[56px] min-w-[56px] sm:min-h-[64px] sm:min-w-[64px] bg-primary hover:bg-primary/90 text-white rounded-full shadow-xl active:scale-95 transition-transform flex items-center justify-center border-2 border-white touch-manipulation disabled:opacity-60"
+          title={isScanning ? 'Scanning…' : 'Manual QR entry'}
+          aria-label={isScanning ? 'Scanning' : 'Enter QR manually'}
         >
-          <Scan className="w-8 h-8 sm:w-10 sm:h-10 lg:w-12 lg:h-12" />
+          {isScanning ? (
+            <span className="w-8 h-8 border-2 border-white border-t-transparent rounded-full animate-spin" />
+          ) : (
+            <Scan className="w-7 h-7 sm:w-8 sm:h-8" />
+          )}
         </button>
         {isScanning && (
-          <div className="absolute -top-10 sm:-top-12 left-1/2 -translate-x-1/2 bg-black/80 text-white px-3 sm:px-4 py-1.5 sm:py-2 rounded-lg text-xs sm:text-sm font-black whitespace-nowrap">
-            SCANNING...
-          </div>
+          <p className="absolute -top-9 left-1/2 -translate-x-1/2 bg-gray-900 text-white px-2 py-1 rounded text-xs font-bold whitespace-nowrap" aria-live="polite">
+            Scanning…
+          </p>
         )}
       </div>
 

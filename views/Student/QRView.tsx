@@ -8,6 +8,8 @@ import { shouldShowQR, getOrderStatusMessage, getOrderUIState } from '../../util
 import { updateDoc, doc, serverTimestamp } from 'firebase/firestore';
 import { db } from '../../firebase';
 import SyncStatus from '../../components/SyncStatus';
+import { useMotivationalHeadline } from '../../hooks/useMotivationalHeadline';
+import MotivationalHeadline from '../../components/MotivationalHeadline';
 
 interface QRViewProps {
   orderId: string;
@@ -19,6 +21,7 @@ const QRView: React.FC<QRViewProps> = ({ orderId, onBack }) => {
   const [loading, setLoading] = useState(true);
   const [qrString, setQrString] = useState<string | null>(null);
   const qrGeneratedRef = useRef(false);
+  const { visible: loadingHeadlineVisible, headline: loadingHeadline } = useMotivationalHeadline(loading);
 
   useEffect(() => {
     console.log('📱 QRView: Setting up real-time listener for order:', orderId);
@@ -92,8 +95,13 @@ const QRView: React.FC<QRViewProps> = ({ orderId, onBack }) => {
 
   if (loading) {
     return (
-      <div className="h-screen w-full flex items-center justify-center bg-background">
+      <div className="relative h-screen w-full flex items-center justify-center bg-background">
         <Loader2 className="w-10 h-10 text-primary animate-spin" />
+        <MotivationalHeadline
+          visible={loadingHeadlineVisible}
+          headline={loadingHeadline}
+          variant="overlay"
+        />
       </div>
     );
   }
@@ -116,6 +124,14 @@ const QRView: React.FC<QRViewProps> = ({ orderId, onBack }) => {
           <CheckCircle2 className="w-16 h-16 text-success mb-4" />
           <h3 className="text-xl font-bold text-textMain mb-2">Order Accepted!</h3>
           <p className="text-textSecondary mb-4">Your order has been scanned and is being prepared.</p>
+          {order.kitchenStatus === 'READY' && (
+            <p className="text-primary font-bold mb-2 flex items-center justify-center gap-2">
+              <CheckCircle2 className="w-5 h-5" /> Ready for pickup
+            </p>
+          )}
+          {order.kitchenStatus && order.kitchenStatus !== 'READY' && order.kitchenStatus !== 'SERVED' && (
+            <p className="text-textSecondary text-sm mb-2">Status: {order.kitchenStatus === 'COOKING' ? 'Cooking' : 'Placed'}</p>
+          )}
           <p className="text-sm text-textSecondary mb-8">Scanned at: {order.scannedAt ? new Date(order.scannedAt).toLocaleTimeString() : 'N/A'}</p>
           <button 
             onClick={onBack}
