@@ -317,6 +317,18 @@ export const addMenuItem = async (item: Omit<MenuItem, 'id'>): Promise<string> =
   }
 };
 
+export const rejectOrder = async (orderId: string, rejectedBy: string, reason: string = 'Staff rejection'): Promise<void> => {
+  const orderRef = doc(db, "orders", orderId);
+  await updateDoc(orderRef, {
+    qrStatus: 'REJECTED',
+    qrState: 'EXPIRED',
+    orderStatus: 'CANCELLED',
+    rejectedBy,
+    rejectedAt: serverTimestamp(),
+    rejectionReason: reason
+  });
+};
+
 export const updateMenuItem = async (id: string, updates: Partial<MenuItem>): Promise<void> => {
   try {
     await updateDoc(doc(db, "menu", id), updates);
@@ -1399,13 +1411,20 @@ export const serveItem = async (orderId: string, itemId: string, servedBy: strin
         servedAt: serverTimestamp()
       });
 
-      // Update inventory (only if it exists)
+      // Update main inventory count
       if (invSnap.exists()) {
         tx.update(invRef, {
           consumed: increment(1),
           lastUpdated: serverTimestamp()
         });
       }
+
+      // Update inventory_meta (for real-time student view)
+      const metaRef = doc(db, "inventory_meta", itemId);
+      tx.update(metaRef, {
+        consumed: increment(1),
+        lastUpdated: serverTimestamp()
+      });
     });
 
     console.log('✅ Item served:', { orderId, itemId, servedBy });

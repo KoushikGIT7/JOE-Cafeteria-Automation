@@ -71,14 +71,14 @@ service cloud.firestore {
     // ========================================================================
     match /inventory/{itemId} {
       allow read: if isAuthenticated() && (hasRole('admin') || hasRole('server') || hasRole('cashier'));
-      allow write: if false;
+      allow write: if hasRole('admin') || hasRole('server');
     }
 
     // Real-time stock for students/guests: read inventory_meta (totalStock, consumed, available, stockStatus)
     match /inventory_meta/{itemId} {
       // Allow public read access (including guest/unauthenticated) for non-sensitive aggregate stock data
       allow read: if true;
-      allow write: if false;
+      allow write: if hasRole('admin') || hasRole('server');
     }
     match /inventory_shards/{itemId}/shards/{shardId} {
       allow read: if isAuthenticated() && (hasRole('admin') || hasRole('server') || hasRole('cashier'));

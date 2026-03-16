@@ -2,7 +2,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { CheckCircle, AlertCircle, Scan, Search, LogOut, RefreshCw } from 'lucide-react';
 import { UserProfile, Order } from '../../types';
-import { listenToActiveOrders, listenToPendingItems, serveItem, validateQRForServing, PendingItem, scanAndServeOrder } from '../../services/firestore-db';
+import { listenToActiveOrders, listenToPendingItems, serveItem, validateQRForServing, PendingItem, scanAndServeOrder, rejectOrder } from '../../services/firestore-db';
 import { initializeScanner, getScanner } from '../../services/scanner';
 import { offlineDetector } from '../../utils/offlineDetector';
 import SyncStatus from '../../components/SyncStatus';
@@ -355,6 +355,19 @@ const ServingCounterView: React.FC<ServingCounterViewProps> = ({ profile, onLogo
     }
   };
 
+  const handleRejectOrderAction = async (orderId: string) => {
+    if (confirm('Are you sure you want to REJECT this order? This will cancel the order and invalidate the QR.')) {
+      setServingKey(`REJECT_${orderId}`);
+      try {
+        await rejectOrder(orderId, profile.uid);
+      } catch (err: any) {
+        alert('Failed to reject order: ' + err.message);
+      } finally {
+        setServingKey(null);
+      }
+    }
+  };
+
   const handleServeReadyItem = async (item: ReadyItem) => {
     if (servingKey) return;
 
@@ -604,9 +617,17 @@ const ServingCounterView: React.FC<ServingCounterViewProps> = ({ profile, onLogo
                            <p className="text-[10px] font-black uppercase tracking-widest text-green-600 mb-1">Customer Token</p>
                            <h3 className="text-2xl sm:text-3xl font-black text-gray-900 leading-none">{firstItem.userName}</h3>
                         </div>
-                        <div className="bg-black text-white px-5 py-2 rounded-2xl">
-                          <p className="text-[8px] font-black uppercase tracking-widest text-gray-400">Order Ref</p>
-                          <p className="text-lg font-black tabular-nums">#{orderNumber}</p>
+                        <div className="flex flex-col sm:flex-row items-center gap-3">
+                          <button
+                            onClick={() => handleRejectOrderAction(firstItem.orderId)}
+                            className="bg-red-50 hover:bg-red-100 text-red-600 px-4 py-2 rounded-2xl text-xs font-black uppercase tracking-wider transition-colors flex items-center gap-2"
+                          >
+                            <AlertCircle className="w-4 h-4" /> Reject Order
+                          </button>
+                          <div className="bg-black text-white px-5 py-2 rounded-2xl">
+                             <p className="text-[8px] font-black text-white/50 uppercase tracking-widest mb-0.5">Order No</p>
+                             <p className="text-xl font-black">{orderNumber}</p>
+                          </div>
                         </div>
                       </div>
                       
