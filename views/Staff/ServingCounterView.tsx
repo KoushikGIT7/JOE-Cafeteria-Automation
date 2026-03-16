@@ -1,8 +1,8 @@
 
 import React, { useState, useEffect, useRef } from 'react';
-import { CheckCircle, AlertCircle, Scan, Search, LogOut } from 'lucide-react';
+import { CheckCircle, AlertCircle, Scan, Search, LogOut, RefreshCw } from 'lucide-react';
 import { UserProfile, Order } from '../../types';
-import { listenToActiveOrders, listenToPendingItems, serveItem, validateQRForServing, PendingItem } from '../../services/firestore-db';
+import { listenToActiveOrders, listenToPendingItems, serveItem, validateQRForServing, PendingItem, scanAndServeOrder } from '../../services/firestore-db';
 import { initializeScanner, getScanner } from '../../services/scanner';
 import { offlineDetector } from '../../utils/offlineDetector';
 import SyncStatus from '../../components/SyncStatus';
@@ -29,7 +29,7 @@ const ServingCounterView: React.FC<ServingCounterViewProps> = ({ profile, onLogo
   const [readyItems, setReadyItems] = useState<ReadyItem[]>([]);
   const [pendingItems, setPendingItems] = useState<PendingItem[]>([]);
   const [error, setError] = useState<{ type: string; message: string } | null>(null);
-  const [success, setSuccess] = useState<{ orderId: string; orderNumber: string; items: string[] } | null>(null);
+  const [success, setSuccess] = useState<{ orderId: string; orderNumber: string; items: any[]; userName: string; qrDataRaw: string } | null>(null);
   const [servingKey, setServingKey] = useState<string | null>(null);
   const [currentTime, setCurrentTime] = useState(new Date());
   const [isOnline, setIsOnline] = useState(true);
@@ -281,7 +281,9 @@ const ServingCounterView: React.FC<ServingCounterViewProps> = ({ profile, onLogo
       setSuccess({
         orderId: order.id,
         orderNumber: order.id.slice(-8).toUpperCase(),
-        items: order.items.map(item => `${item.name} x${item.quantity}`)
+        userName: order.userName,
+        items: order.items,
+        qrDataRaw: qrDataString
       });
       
       // Auto-hide success after 3 seconds
@@ -329,6 +331,23 @@ const ServingCounterView: React.FC<ServingCounterViewProps> = ({ profile, onLogo
           setIsScanning(false);
         }, 100);
       }
+    }
+  };
+
+  const handleServeAllFromScan = async () => {
+    if (!success) return;
+    
+    setServingKey('SERVE_ALL');
+    try {
+      // Use the scanAndServeOrder which marks QR as USED and updates inventory
+      await scanAndServeOrder(success.qrDataRaw, profile.uid);
+      setSuccess(null);
+      // Main list will update via Firestore listeners
+    } catch (err: any) {
+      setError({ type: 'ERROR', message: err.message || 'Failed to serve all items' });
+      setTimeout(() => setError(null), 3000);
+    } finally {
+      setServingKey(null);
     }
   };
 
@@ -411,41 +430,73 @@ const ServingCounterView: React.FC<ServingCounterViewProps> = ({ profile, onLogo
       {/* Order confirmation panel — overlay; scanner layout stays visible underneath */}
       {success && (
         <div
-          className="absolute inset-0 z-[100] flex items-end sm:items-center justify-center p-0 sm:p-4 bg-black/20 sm:bg-black/30"
+          className="absolute inset-0 z-[100] flex items-end sm:items-center justify-center p-0 sm:p-4 bg-black/60 backdrop-blur-sm"
           onClick={dismissSuccess}
-          aria-hidden="true"
         >
           <div
-            className="w-full bg-green-600 text-white rounded-t-3xl sm:rounded-2xl shadow-2xl border-t-4 border-green-700 sm:max-w-md pointer-events-auto flex flex-col max-h-[85vh] sm:max-h-[80vh]"
-            style={{ animation: 'slideUp 0.25s ease-out' }}
-            role="alert"
-            aria-live="polite"
+            className="w-full bg-[#1a1a1a] text-white rounded-t-[2.5rem] sm:rounded-[2.5rem] shadow-2xl border-t border-white/10 sm:max-w-md pointer-events-auto flex flex-col max-h-[85vh] overflow-hidden"
+            style={{ animation: 'slideUp 0.3s cubic-bezier(0.16, 1, 0.3, 1)' }}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="order-success-title"
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="p-4 sm:p-5 flex-shrink-0 flex items-center justify-between gap-3">
-              <div className="flex items-center gap-3">
-                <CheckCircle className="w-10 h-10 sm:w-12 sm:h-12 flex-shrink-0 text-green-200" />
-                <div>
-                  <p className="text-xs font-bold uppercase tracking-widest text-green-200">Order loaded</p>
-                  <p className="text-xl sm:text-2xl font-black">#{success.orderNumber}</p>
-                </div>
-              </div>
-              <button
-                onClick={dismissSuccess}
-                className="min-h-[44px] min-w-[44px] flex items-center justify-center rounded-xl bg-white/20 hover:bg-white/30 text-white font-black text-sm uppercase active:scale-95 transition-all"
-                aria-label="Continue scanning"
-              >
-                OK
-              </button>
+            {/* Success Header */}
+            <div className="p-6 pb-2 text-center relative">
+               <div className="absolute top-2 left-1/2 -translate-x-1/2 w-12 h-1 bg-white/10 rounded-full sm:hidden" />
+               <div className="w-16 h-16 bg-success rounded-3xl mx-auto flex items-center justify-center shadow-lg shadow-success/20 mb-4">
+                  <CheckCircle className="w-10 h-10 text-white" />
+               </div>
+               <div className="inline-flex items-center gap-2 bg-success/10 text-success px-3 py-1 rounded-full border border-success/20 mb-2">
+                  <div className="w-1.5 h-1.5 rounded-full bg-success animate-pulse" />
+                  <span className="text-[10px] font-black uppercase tracking-widest">Token Authorized</span>
+               </div>
+               <h2 id="order-success-title" className="text-3xl font-black uppercase tracking-tighter">Order #{success.orderNumber}</h2>
+               <p className="text-white/40 text-[10px] font-black uppercase tracking-widest mt-1">Customer: {success.userName}</p>
             </div>
-            <div className="flex-1 overflow-y-auto px-4 pb-4 space-y-2 border-t border-green-500/50 pt-3">
+
+            {/* LARGE ITEMS VIEW */}
+            <div className="flex-1 overflow-y-auto px-6 py-4 space-y-4">
               {success.items.map((item, index) => (
-                <div key={index} className="bg-white/10 rounded-xl px-3 py-2.5">
-                  <p className="text-sm sm:text-base font-bold">{item}</p>
+                <div key={index} className="bg-white/5 border border-white/10 rounded-3xl p-3 flex items-center gap-4">
+                   <div className="w-24 h-24 rounded-2xl overflow-hidden bg-gray-900 border border-white/10 flex-shrink-0 shadow-inner">
+                      <img 
+                        src={item.imageUrl || 'https://images.unsplash.com/photo-1546069901-ba9599a7e63c?w=400&h=400&fit=crop'} 
+                        alt={item.name}
+                        className="w-full h-full object-cover"
+                      />
+                   </div>
+                   <div className="flex-1 pr-4">
+                      <h3 className="text-xl font-black tracking-tight leading-tight mb-1">{item.name}</h3>
+                      <div className="flex items-center gap-2">
+                         <span className="text-2xl font-black text-primary">x{item.quantity}</span>
+                         <span className="bg-white/10 px-2 py-0.5 rounded text-[8px] font-black text-white/40 uppercase tracking-widest leading-none">Qty</span>
+                      </div>
+                   </div>
                 </div>
               ))}
             </div>
-            <p className="px-4 pb-4 pt-1 text-center text-sm text-green-100 font-medium">Scan next QR or tap OK</p>
+
+            {/* Action Footer */}
+            <div className="p-6 bg-black/40 border-t border-white/5 space-y-3">
+               <div className="grid grid-cols-2 gap-4">
+                  <button
+                    onClick={dismissSuccess}
+                    className="bg-white/5 hover:bg-white/10 py-5 rounded-3xl font-black uppercase tracking-widest active:scale-95 transition-all flex items-center justify-center gap-2 border border-white/10"
+                  >
+                    OK
+                  </button>
+                  <button
+                    onClick={handleServeAllFromScan}
+                    disabled={servingKey === 'SERVE_ALL'}
+                    className="bg-success hover:bg-success/90 py-5 rounded-3xl font-black uppercase tracking-widest active:scale-95 transition-all shadow-xl shadow-success/30 flex items-center justify-center gap-2"
+                  >
+                    {servingKey === 'SERVE_ALL' ? <RefreshCw className="animate-spin w-5 h-5" /> : <CheckCircle className="w-5 h-5" />}
+                    Serve All
+                  </button>
+               </div>
+               <p className="text-center text-[9px] font-black text-white/20 uppercase tracking-[0.2em]">Destroys QR on serve</p>
+            </div>
           </div>
         </div>
       )}
