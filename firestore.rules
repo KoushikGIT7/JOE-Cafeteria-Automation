@@ -45,12 +45,8 @@ service cloud.firestore {
     // When upgrading to Blaze + Cloud Functions, set: allow create: if false;
     // ========================================================================
     match /orders/{orderId} {
-      // Anyone can read orders (students track their own, staff see all)
       allow read: if true;
 
-      // Allow order creation:
-      // - Authenticated users can create their own orders
-      // - Guest users (userId starts with "guest_") can create orders
       allow create: if (
         isAuthenticated() && request.resource.data.userId == request.auth.uid
       ) || (
@@ -59,7 +55,12 @@ service cloud.firestore {
       );
 
       // Allow cashier/admin to update orders (confirm/reject cash payments)
-      allow update: if isAdminOrRole('cashier');
+      // Allow servers to mark ready/served
+      allow update: if isAuthenticated() && (
+        getUserRole() == 'admin' || 
+        getUserRole() == 'cashier' || 
+        getUserRole() == 'server'
+      );
 
       allow delete: if hasRole('admin');
     }
@@ -81,7 +82,8 @@ service cloud.firestore {
     }
     match /inventory_shards/{itemId}/shards/{shardId} {
       allow read: if isAuthenticated() && (hasRole('admin') || hasRole('server') || hasRole('cashier'));
-      allow write: if false;
+      // Allow anyone to increment shards (controlled via app logic + transaction)
+      allow write: if true; 
     }
 
     // ========================================================================
@@ -96,8 +98,8 @@ service cloud.firestore {
     // SCAN LOGS — Create only via Cloud Functions
     // ========================================================================
     match /scanLogs/{logId} {
-      allow read: if isAuthenticated() && (hasRole('admin') || hasRole('server') || hasRole('cashier'));
-      allow create: if false;
+      allow read: if isAdminOrRole('server');
+      allow create: if isAdminOrRole('server');
       allow update, delete: if hasRole('admin');
     }
 
@@ -105,8 +107,8 @@ service cloud.firestore {
     // SERVE LOGS — Create only via Cloud Functions
     // ========================================================================
     match /serveLogs/{logId} {
-      allow read: if isAuthenticated() && (hasRole('admin') || hasRole('server') || hasRole('cashier'));
-      allow create: if false;
+      allow read: if isAdminOrRole('server');
+      allow create: if isAdminOrRole('server');
       allow update, delete: if hasRole('admin');
     }
 

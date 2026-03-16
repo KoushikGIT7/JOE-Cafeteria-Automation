@@ -835,24 +835,71 @@ export const createOrder = async (orderData: Omit<Order, 'id' | 'createdAt'> & {
       servedQty: 0,
       remainingQty: item.quantity
     }));
-    const newOrder: Order = {
-      ...orderData,
-      items: itemsWithQty,
-      id,
-      createdAt,
-      orderStatus: 'PENDING'
-    } as Order;
-    if (newOrder.paymentStatus === 'SUCCESS') {
-      newOrder.qrStatus = 'ACTIVE';
-      const token = generateQRPayloadSync(newOrder);
-      newOrder.qr = { token, status: 'ACTIVE', createdAt };
-    }
-    await setDoc(doc(db, "orders", id), orderToFirestore(newOrder));
+
+    // Perform atomic transaction on the client side
+    const result = await runTransaction(db, async (transaction) => {
+      // 1. Idempotency check
+      if (orderData.idempotencyKey) {
+        const idempQuery = query(
+          collection(db, "orders"),
+          where("idempotencyKey", "==", orderData.idempotencyKey),
+          limit(1)
+        );
+        const idempSnap = await getDocs(idempQuery);
+        if (!idempSnap.empty) {
+          return idempSnap.docs[0].id;
+        }
+      }
+
+      // 2. Stock validation
+      for (const item of orderData.items) {
+        const metaRef = doc(db, "inventory_meta", item.id);
+        const metaSnap = await transaction.get(metaRef);
+        if (metaSnap.exists()) {
+          const data = metaSnap.data();
+          const available = (data.totalStock ?? 0) - (data.consumed ?? 0);
+          if (available < item.quantity) {
+            throw new Error(`OUT_OF_STOCK: ${item.name}`);
+          }
+        }
+      }
+
+      // 3. Prepare order
+      const newOrder: Order = {
+        ...orderData,
+        items: itemsWithQty,
+        id,
+        createdAt,
+        orderStatus: 'PENDING'
+      } as Order;
+
+      if (newOrder.paymentStatus === 'SUCCESS') {
+        newOrder.qrStatus = 'ACTIVE';
+        const token = generateQRPayloadSync(newOrder);
+        newOrder.qr = { token, status: 'ACTIVE', createdAt };
+      }
+
+      // 4. Update Inventory Shards (Atomic count increment)
+      for (const item of orderData.items) {
+        const shardIndex = Math.floor(Math.random() * INVENTORY_SHARD_COUNT);
+        const shardRef = doc(db, "inventory_shards", item.id, "shards", `shard_${shardIndex}`);
+        transaction.set(shardRef, { 
+          count: increment(item.quantity),
+          lastUpdated: serverTimestamp() 
+        }, { merge: true });
+      }
+
+      // 5. Write order
+      transaction.set(doc(db, "orders", id), orderToFirestore(newOrder));
+      return id;
+    });
+
     try {
       const { invalidateReportsCache } = await import('./reporting');
       invalidateReportsCache();
     } catch (_e) {}
-    return id;
+
+    return result;
   } catch (error: any) {
     if (error.code === 'unavailable' || error.code === 'deadline-exceeded') {
       console.warn("Network error during order creation (order may be queued):", error);
