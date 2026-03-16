@@ -1228,7 +1228,7 @@ export const validateQRForServing = async (qrData: string): Promise<Order> => {
       throw new Error("INVALID_TOKEN_FORMAT - This does not look like a JOE Meal Token.");
     }
 
-    const { orderId, userId, cafeteriaId, secureHash } = payload;
+    const { orderId, userId, cafeteriaId, secureHash, expiresAt: payloadExpiresAt, createdAt: payloadCreatedAt } = payload;
 
     // 2. Direct Firestore Fetch (The Source of Truth)
     const orderDoc = await getDoc(doc(db, "orders", orderId));
@@ -1240,19 +1240,21 @@ export const validateQRForServing = async (qrData: string): Promise<Order> => {
     const order = firestoreToOrder(orderDoc.id, orderData);
 
     // 3. Cryptographic Signature Verification
-    // Prevents forged tokens by checking against the server-generated hash
-    const qrExpiresAt = order.createdAt + 24 * 60 * 60 * 1000; // 24hr validity
-    const isValid = verifySecureHash(
+    // Use timestamps from payload for verification as they were used in generation
+    const verifCreatedAt = payloadCreatedAt || order.createdAt;
+    const verifExpiresAt = payloadExpiresAt || (verifCreatedAt + 24 * 60 * 60 * 1000);
+
+    const isValid = await verifySecureHash(
       orderId, 
       userId, 
       cafeteriaId, 
-      order.createdAt, 
-      qrExpiresAt, 
+      verifCreatedAt, 
+      verifExpiresAt, 
       secureHash
     );
 
     if (!isValid) {
-      throw new Error("SECURITY_BREACH - Token signature is invalid or forged.");
+      throw new Error("SECURITY_BREACH - Token signature is invalid or expired.");
     }
 
     // 4. Status Checks
