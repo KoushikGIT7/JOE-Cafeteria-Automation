@@ -23,6 +23,7 @@ export const createOrderCallable = httpsCallable<
     paymentType: string;
     paymentStatus?: string;
     cafeteriaId?: string;
+    idempotencyKey?: string;
   },
   { orderId: string }
 >(functions, "createOrder");

@@ -81,7 +81,7 @@ async function getStationConfig(stationId) {
 
 // --- createOrder (authenticated or guest via data.userId) ---
 exports.createOrder = functions
-  .runWith({ timeoutSeconds: 30, memory: "512MB", minInstances: 0, maxInstances: 20 })
+  .runWith({ timeoutSeconds: 30, memory: "512MB", minInstances: 2, maxInstances: 50 })
   .https.onCall(async (data, context) => {
     const uid = context.auth ? context.auth.uid : null;
     const guestId = data.userId && String(data.userId).startsWith("guest_") ? data.userId : null;
@@ -105,35 +105,100 @@ exports.createOrder = functions
     if (items.length > MAX_ITEMS_PER_ORDER) {
       throw new functions.https.HttpsError("invalid-argument", "BURST_LIMIT - Maximum " + MAX_ITEMS_PER_ORDER + " different items per order.");
     }
-    for (const it of items) {
-      const q = it.quantity || 1;
-      if (q > MAX_QUANTITY_PER_ITEM) {
-        throw new functions.https.HttpsError("invalid-argument", "BURST_LIMIT - Maximum " + MAX_QUANTITY_PER_ITEM + " per item. Reduce quantity for " + (it.name || it.id) + ".");
-      }
-    }
 
-    // Stock check: ensure each item has enough available (totalStock - consumed >= quantity)
-    const qtyByItem = {};
-    items.forEach((it) => {
-      const id = it.id;
-      qtyByItem[id] = (qtyByItem[id] || 0) + (it.quantity || 1);
+    const idempotencyKey = data.idempotencyKey || null;
+
+    // Use a transaction for atomic stock check and order creation
+    const result = await db.runTransaction(async (transaction) => {
+      // 1. Idempotency check
+      if (idempotencyKey) {
+        const idempSnap = await transaction.get(db.collection("orders").where("idempotencyKey", "==", idempotencyKey).limit(1));
+        if (!idempSnap.empty) {
+          return { orderId: idempSnap.docs[0].id, duplicate: true };
+        }
+      }
+
+      // 2. Stock check & prep items
+      const qtyByItem = {};
+      items.forEach((it) => {
+        const id = it.id;
+        qtyByItem[id] = (qtyByItem[id] || 0) + (it.quantity || 1);
+        if ((it.quantity || 1) > MAX_QUANTITY_PER_ITEM) {
+          throw new functions.https.HttpsError("invalid-argument", "BURST_LIMIT - Maximum " + MAX_QUANTITY_PER_ITEM + " per item.");
+        }
+      });
+
+      for (const itemId of Object.keys(qtyByItem)) {
+        const metaRef = db.collection("inventory_meta").doc(itemId);
+        const metaSnap = await transaction.get(metaRef);
+        if (metaSnap.exists) {
+          const d = metaSnap.data();
+          const available = (d.totalStock ?? 0) - (d.consumed ?? 0);
+          if (available < qtyByItem[itemId]) {
+            throw new functions.https.HttpsError("failed-precondition", "OUT_OF_STOCK - " + (d.itemName || itemId));
+          }
+        }
+      }
+
+      // 3. Create order object
+      const orderId = `order_${now}_${Math.random().toString(36).slice(2, 9)}`;
+      const createdAt = admin.firestore.Timestamp.fromMillis(now);
+      const itemsWithQty = items.map((item) => ({
+        id: item.id,
+        name: item.name || "",
+        price: item.price || 0,
+        costPrice: item.costPrice,
+        category: item.category,
+        imageUrl: item.imageUrl,
+        quantity: item.quantity || 1,
+        servedQty: 0,
+        remainingQty: item.quantity || 1,
+      }));
+      
+      const paymentStatus = data.paymentStatus || "PENDING";
+      const orderStatus = "PENDING";
+      const orderType = deriveOrderType(items);
+      const qrStatus = paymentType === "CASH" ? "PENDING_PAYMENT" : (paymentStatus === "SUCCESS" ? "ACTIVE" : "PENDING_PAYMENT");
+      const serveFlowStatus = orderType === "FAST_ITEM" && paymentStatus === "SUCCESS" ? "PAID" : orderType === "PREPARATION_ITEM" ? "NEW" : "PAID";
+
+      const orderDoc = {
+        orderId,
+        userId,
+        userName: userName || "Guest",
+        items: itemsWithQty,
+        totalAmount: totalAmount || 0,
+        paymentType: paymentType || "CASH",
+        paymentStatus,
+        orderStatus,
+        qrStatus,
+        qrState: "ACTIVE",
+        qr: null,
+        kitchenStatus: "PLACED",
+        cafeteriaId: cafeteriaId || "main",
+        createdAt,
+        orderType,
+        serveFlowStatus: orderType === "FAST_ITEM" && paymentStatus !== "SUCCESS" ? null : serveFlowStatus,
+        preparationStationId: orderType === "PREPARATION_ITEM" ? derivePreparationStationId(items) : null,
+        idempotencyKey: idempotencyKey,
+      };
+
+      transaction.set(db.collection("orders").doc(orderId), orderDoc);
+
+      // 4. Update Inventory Shards (Atomic decrement)
+      for (const itemId of Object.keys(qtyByItem)) {
+        const shardIndex = Math.floor(Math.random() * INVENTORY_SHARD_COUNT);
+        const shardRef = db.collection("inventory_shards").doc(itemId).collection("shards").doc(`shard_${shardIndex}`);
+        transaction.set(shardRef, { 
+          count: admin.firestore.FieldValue.increment(qtyByItem[itemId]),
+          lastUpdated: admin.firestore.FieldValue.serverTimestamp()
+        }, { merge: true });
+      }
+
+      return { orderId };
     });
-    for (const itemId of Object.keys(qtyByItem)) {
-      const metaSnap = await db.collection("inventory_meta").doc(itemId).get();
-      const need = qtyByItem[itemId];
-      if (!metaSnap.exists) {
-        // No meta: allow order (legacy items without inventory_meta)
-        continue;
-      }
-      const d = metaSnap.data();
-      const totalStock = d.totalStock ?? 0;
-      const consumed = d.consumed ?? 0;
-      const available = totalStock - consumed;
-      if (available < need) {
-        const name = d.itemName || itemId;
-        throw new functions.https.HttpsError("failed-precondition", "OUT_OF_STOCK - " + (name ? name + " is" : "Item is") + " currently out of stock.");
-      }
-    }
+
+    return result;
+
 
     if (!guestId && uid) {
       const fiveSecAgo = admin.firestore.Timestamp.fromMillis(now - MIN_SECONDS_BETWEEN_ORDERS * 1000);

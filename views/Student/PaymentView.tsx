@@ -93,16 +93,6 @@ const PaymentView: React.FC<PaymentViewProps> = ({ profile, onBack, onSuccess })
   const handlePayment = async () => {
     setState('PROCESSING');
     
-    // Prevent browser from showing credential dialogs during payment
-    try {
-      // Disable credential storage during payment
-      if (window.navigator && window.navigator.credentials) {
-        window.navigator.credentials = undefined as any;
-      }
-    } catch (e) {
-      // Silently fail if we can't disable credentials
-    }
-    
     // Simulate payment gateway delay
     await new Promise(resolve => setTimeout(resolve, 1500));
 
@@ -113,6 +103,9 @@ const PaymentView: React.FC<PaymentViewProps> = ({ profile, onBack, onSuccess })
       
       console.log('💳 Processing payment for:', { isCash, guestId, method: selectedMethod });
       
+      // Generate idempotency key to prevent double orders
+      const idempotencyKey = `idemp_${guestId}_${total}_${Date.now()}`;
+
       const newOrderId = await createOrder({
         userId: guestId,
         userName: guestName,
@@ -122,7 +115,8 @@ const PaymentView: React.FC<PaymentViewProps> = ({ profile, onBack, onSuccess })
         paymentStatus: isCash ? 'PENDING' : 'SUCCESS',
         orderStatus: 'PENDING',
         qrStatus: isCash ? 'PENDING_PAYMENT' : 'ACTIVE',
-        cafeteriaId: 'MAIN_CAFE'
+        cafeteriaId: 'MAIN_CAFE',
+        idempotencyKey
       });
 
       console.log('✅ Order created successfully:', newOrderId);

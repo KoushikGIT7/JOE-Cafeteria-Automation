@@ -795,7 +795,7 @@ export const listenToPreparationOrders = (callback: (orders: Order[]) => void, l
 // 4. ORDERING SYSTEM (REAL-TIME)
 // ============================================================================
 
-export const createOrder = async (orderData: Omit<Order, 'id' | 'createdAt'>): Promise<string> => {
+export const createOrder = async (orderData: Omit<Order, 'id' | 'createdAt'> & { idempotencyKey?: string }): Promise<string> => {
   if (useCallables()) {
     try {
       const { data } = await createOrderCallable({
@@ -814,6 +814,7 @@ export const createOrder = async (orderData: Omit<Order, 'id' | 'createdAt'>): P
         paymentType: orderData.paymentType,
         paymentStatus: orderData.paymentStatus,
         cafeteriaId: orderData.cafeteriaId,
+        idempotencyKey: orderData.idempotencyKey,
       });
       try {
         const { invalidateReportsCache } = await import('./reporting');
